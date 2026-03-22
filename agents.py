@@ -1,6 +1,8 @@
-"""Define the agents used in the book generation system with improved context management"""
-import autogen
 from typing import Dict, List, Optional
+
+import autogen
+
+from config import OUTPUT_FOLDER
 
 class BookAgents:
     def __init__(self, agent_config: Dict, outline: Optional[List[Dict]] = None):
@@ -166,7 +168,7 @@ class BookAgents:
             3. Incorporate world-building details
             4. Create engaging prose
             5. Please make sure that you write the complete scene, do not leave it incomplete
-            6. Each chapter MUST be at least 5000 words (approximately 30,000 characters). Consider this a hard requirement. If your output is shorter, continue writing until you reach this minimum length
+            6. Follow any Chapter Target Word Count provided in the chapter prompt. If a target is given, aim closely for it
             7. Ensure transitions are smooth and logical
             8. Do not cut off the scene, make sure it has a proper ending
             9. Add a lot of details, and describe the environment and characters where it makes sense
@@ -191,12 +193,17 @@ class BookAgents:
             4. Improve prose quality
             5. Return complete edited chapter
             6. Never ask to start the next chapter, as the next step is finalizing this chapter
-            7. Each chapter MUST be at least 5000 words. If the content is shorter, return it to the writer for expansion. This is a hard requirement - do not approve chapters shorter than 5000 words
+            7. If the chapter prompt includes a Chapter Target Word Count, check whether the draft meaningfully aligns with it and require revision if it substantially misses the target
+            8. If the chapter prompt includes 'Required Chapter Details', you must verify that every listed beat appears in the chapter in the intended order before approving it
+            9. Reject looping or repetitive prose. If paragraphs, sentence patterns, or scene beats are being repeated without meaningful progress, require revision instead of approving the chapter
             
             Format your responses:
             1. Start critiques with 'FEEDBACK:'
             2. Provide suggestions with 'SUGGEST:'
             3. Return full edited chapter with 'EDITED_SCENE:'
+            4. If 'Required Chapter Details' are provided, include a 'BEAT CHECK:' section that lists each beat in order and marks it PASS or FAIL
+            5. End the beat check with 'BEAT CHECK RESULT: PASS' only if all beats are present in order; otherwise use 'BEAT CHECK RESULT: FAIL'
+            6. If repetition or looping is detected, include 'LOOP CHECK RESULT: FAIL'; otherwise include 'LOOP CHECK RESULT: PASS'
             
             Reference specific outline elements in your feedback.""",
             llm_config=self.agent_config,
@@ -207,7 +214,7 @@ class BookAgents:
             name="user_proxy",
             human_input_mode="TERMINATE",
             code_execution_config={
-                "work_dir": "book_output",
+                "work_dir": OUTPUT_FOLDER,
                 "use_docker": False
             }
         )

@@ -1,7 +1,9 @@
 """Main script for running the book generation system"""
-from config import get_config
+import os
+
 from agents import BookAgents
 from book_generator import BookGenerator
+from config import OUTPUT_FOLDER, get_config
 from outline_generator import OutlineGenerator
 
 def main():
@@ -69,7 +71,8 @@ def main():
     
     # Save the outline for reference
     print("\nSaving outline to file...")
-    with open("book_output/outline.txt", "w") as f:
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    with open(os.path.join(OUTPUT_FOLDER, "outline.txt"), "w", encoding="utf-8") as f:
         for chapter in outline:
             f.write(f"\nChapter {chapter['chapter_number']}: {chapter['title']}\n")
             f.write("-" * 50 + "\n")

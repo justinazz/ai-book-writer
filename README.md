@@ -51,6 +51,33 @@ if __name__ == "__main__":
     main()
 ```
 
+2. Browser control panel:
+```bash
+python web_ui.py
+```
+
+Then open `http://127.0.0.1:8000` in your browser. The UI lets you:
+- start a run with structured prompt sections and chapter count
+- choose an outline model and writer model independently
+- refresh the available model list from the configured API endpoint
+- save and load reusable generation configs as JSON
+- review and approve the outline before chapter generation starts
+- attach chapter-specific improvement notes
+- regenerate an individual chapter using its saved notes
+- inspect continuity summaries, character/world notes, and progress events
+- toggle between `Keep Going` and `Ask for Advice`
+- queue guidance for the next checkpoint
+- continue or stop the run from the browser
+
+The current implementation pauses at checkpoints after the outline and after each generated chapter, which gives you a place to steer the next step without fighting the console.
+
+On Windows, you can also use:
+```bat
+Launch Web UI.bat
+```
+
+This starts the local server and opens the browser automatically.
+
 2. Custom initial prompt:
 ```python
 from config import get_config

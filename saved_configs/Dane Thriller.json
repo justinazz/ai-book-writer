@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "Dane Thriller",
+  "created_at": "2026-03-21 20:08:35 UTC",
+  "endpoint_url": "http://127.0.0.1:1234/v1",
+  "outline_model": "qwen3.5-9b-uncensored-hauhaucs-aggressive",
+  "writer_model": "qwen3.5-9b-uncensored-hauhaucs-aggressive",
+  "num_chapters": 10,
+  "mode": "keep_going",
+  "prompt_sections": {
+    "premise": "Create a story in my established writing style about Dane, a software engineer who discovers his stock prediction algorithm points to a catastrophic market crash.",
+    "storylines": "Corporate pressure around Dane's presentation.\r\nThe uncertainty over whether the model is wrong or prophetic.\r\nIntersecting finance, office politics, and personal strain.",
+    "setting": "A contemporary financial technology company in a modern city, with offices, transit, and corporate presentation rooms.",
+    "characters": "Dane: brilliant, overworked software engineer.\r\nGary: nervous boss trying to balance support and optics.\r\nJonathan Morego: skeptical executive asking hard questions.",
+    "writing_style": "Third-person limited focused on Dane. Direct and technical around code and markets, more introspective in personal moments.",
+    "tone": "Technical thriller blended with workplace drama, grounded and tense.",
+    "plot_beats": "Dane finishes the model late at night.\r\nThe model predicts a crash.\r\nHe oversleeps and races to the presentation.\r\nExecutives challenge the validity of his findings.",
+    "constraints": "Use intersecting storylines. Keep the corporate and financial details grounded in reality. Maintain tension around whether the prediction is an error.\r\nAround 1000 words per chapter."
+  }
+}
