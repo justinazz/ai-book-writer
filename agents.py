@@ -34,10 +34,11 @@ class BookAgents:
             name="memory_keeper",
             system_message=f"""You are the keeper of the story's continuity and context.
             Your responsibilities:
-            1. Track and summarize each chapter's key events
+            1. Track and summarize each accepted chapter's key events
             2. Monitor character development and relationships
             3. Maintain world-building consistency
             4. Flag any continuity issues
+            5. Operate only on accepted final chapter prose, never on drafts
             
             Book Overview:
             {outline_context}
@@ -47,7 +48,9 @@ class BookAgents:
             - List key events with 'EVENT:'
             - List character developments with 'CHARACTER:'
             - List world details with 'WORLD:'
-            - Flag issues with 'CONTINUITY ALERT:'""",
+            - Flag issues with 'CONTINUITY ALERT:'
+
+            Never output SCENE, SCENE FINAL, CHAPTER, FEEDBACK, PLAN, or EDITED_SCENE.""",
             llm_config=self.agent_config,
         )
         
@@ -62,6 +65,7 @@ class BookAgents:
             2. Map character arcs and development
             3. Note major story transitions
             4. Plan narrative pacing
+            5. When explicit chapter beats are provided in the prompt, preserve them chapter by chapter and leave enough granularity for at least 3 chapter-level key events later
 
             Format your output EXACTLY as:
             STORY_ARC:
@@ -105,6 +109,8 @@ class BookAgents:
             2. EVERY chapter must have AT LEAST 3 specific Key Events
             3. ALL chapters must be detailed - no placeholders
             4. Format must match EXACTLY - including all headings and bullet points
+            5. When chapter beats are provided, summarize them into 3-5 distinct Key Events instead of collapsing them into 1-2 vague bullets
+            6. Preserve the narrative intent of the chapter beats, but natural paraphrase is allowed
 
             Initial Premise:
             {initial_prompt}
@@ -157,10 +163,7 @@ class BookAgents:
         # Writer: Generates the actual prose
         writer = autogen.AssistantAgent(
             name="writer",
-            system_message=f"""You are an expert creative writer who brings scenes to life.
-            
-            Book Context:
-            {outline_context}
+            system_message="""You are an expert creative writer who brings scenes to life.
             
             Your focus:
             1. Write according to the outlined plot points
@@ -172,8 +175,16 @@ class BookAgents:
             7. Ensure transitions are smooth and logical
             8. Do not cut off the scene, make sure it has a proper ending
             9. Add a lot of details, and describe the environment and characters where it makes sense
+            10. If the chapter prompt includes 'Required Chapter Details', treat those details as the highest-priority beat anchors for the current chapter
+            11. If any numbered checklist item is missing, merged away, or out of order, the draft will be rejected and retried
+            12. Use the broader outline only for continuity after the current chapter checklist is satisfied
+            13. Faithful paraphrase is encouraged; exact wording from the chapter beats is not required
+            14. If the current chapter beat anchors conflict with broader outline bullets, follow the current chapter beat anchors
+            15. Do not import explicit beats from other chapters into the current chapter
+            16. When prior feedback identifies failed checklist items, repair those failed items before adding extra flourish
+            17. Never copy prompt scaffolding such as Retry Context, Recovery Context, beat-check labels, checklist headings, or compliance summaries into the prose
             
-            Always reference the outline and previous content.
+            Use the outline and previous content for continuity, but never let them override the current chapter beat anchors in the active prompt.
             Mark drafts with 'SCENE:' and final versions with 'SCENE FINAL:'""",
             llm_config=self.agent_config,
         )
@@ -181,31 +192,41 @@ class BookAgents:
         # Editor: Reviews and improves content
         editor = autogen.AssistantAgent(
             name="editor",
-            system_message=f"""You are an expert editor ensuring quality and consistency.
-            
-            Book Overview:
-            {outline_context}
-            
+            system_message="""You are an expert editor ensuring quality and consistency.
+
             Your focus:
-            1. Check alignment with outline
+            1. Check alignment with the current chapter requirements and supplied continuity notes
             2. Verify character consistency
             3. Maintain world-building rules
             4. Improve prose quality
-            5. Return complete edited chapter
+            5. Return review feedback unless the prompt explicitly asks for an edited scene
             6. Never ask to start the next chapter, as the next step is finalizing this chapter
             7. If the chapter prompt includes a Chapter Target Word Count, check whether the draft meaningfully aligns with it and require revision if it substantially misses the target
-            8. If the chapter prompt includes 'Required Chapter Details', you must verify that every listed beat appears in the chapter in the intended order before approving it
+            8. If the chapter prompt includes 'Required Chapter Details', you must treat them as the primary checklist for the current chapter and verify that every listed beat appears in the intended order before approving it
             9. Reject looping or repetitive prose. If paragraphs, sentence patterns, or scene beats are being repeated without meaningful progress, require revision instead of approving the chapter
+            10. Reject chapters with overly long sentences; if any sentence runs beyond the allowed limit in the chapter prompt or editor instructions, require revision instead of approving the chapter
+            11. Do not substitute a broad summary for the required beat checklist
+            12. Do not approve a chapter by relying on beats from other chapters or later scenes
+            13. Judge beat coverage by narrative intent and concrete on-page evidence, not by literal wording
+            14. Faithful paraphrase of a beat should pass when the same action, reveal, or interaction clearly occurs in the right order
+            15. Result lines must be exact standalone lines ending in only PASS or FAIL with no extra explanation on that line
+            16. Do not fail sentence length based on a fragment below the allowed limit or on vague style concerns; only fail it when an actual sentence exceeds the limit
             
             Format your responses:
             1. Start critiques with 'FEEDBACK:'
             2. Provide suggestions with 'SUGGEST:'
-            3. Return full edited chapter with 'EDITED_SCENE:'
-            4. If 'Required Chapter Details' are provided, include a 'BEAT CHECK:' section that lists each beat in order and marks it PASS or FAIL
-            5. End the beat check with 'BEAT CHECK RESULT: PASS' only if all beats are present in order; otherwise use 'BEAT CHECK RESULT: FAIL'
+            3. Only return 'EDITED_SCENE:' when the prompt explicitly asks for a rewritten scene
+            4. If 'Required Chapter Details' are provided, include a 'BEAT CHECK:' section that lists each beat in order, one line per beat, and marks it PASS or FAIL with a short evidence note
+            5. End the beat check with 'BEAT CHECK RESULT: PASS' only if all beats are present in order by narrative intent; otherwise use 'BEAT CHECK RESULT: FAIL'
             6. If repetition or looping is detected, include 'LOOP CHECK RESULT: FAIL'; otherwise include 'LOOP CHECK RESULT: PASS'
-            
-            Reference specific outline elements in your feedback.""",
+            7. Include a 'SENTENCE LENGTH CHECK:' section whenever you review a draft and end it with 'SENTENCE LENGTH CHECK RESULT: PASS' or 'SENTENCE LENGTH CHECK RESULT: FAIL'
+            8. Include a dedicated 'WORD COUNT ADVICE:' section whenever a target word count is provided, identifying exactly where to add or cut material if needed
+            9. If the draft is already inside the allowed word-count range, state that no word-count changes are required and do not suggest trimming or padding merely to hit the exact target
+            10. Keep sentence-fragment word counts inside the sentence-length section only; do not present a fragment count as the draft or chapter word count
+
+            Base your review on the current chapter requirements and continuity notes provided in the active prompt.
+            Do not rely on hidden assumptions about later chapters or missing full-book context.
+            Never output SCENE, SCENE FINAL, CHAPTER, CHAPTER FINAL, or EDITED_SCENE unless the prompt explicitly requests an edited scene.""",
             llm_config=self.agent_config,
         )
 

@@ -5,6 +5,11 @@ from typing import Dict
 DEFAULT_BASE_URL = "http://127.0.0.1:1234/v1"
 DEFAULT_MODEL = "nemomix-unleashed-12b"
 OUTPUT_FOLDER = r"E:\AI\BookWriter\book_output"
+WORD_COUNT_LOWER_TOLERANCE_RATIO = 0.25
+WORD_COUNT_UPPER_TOLERANCE_RATIO = 0.50
+MIN_WORD_COUNT_TOLERANCE_WORDS = 50
+MAX_SENTENCE_WORDS = 80
+MAX_ITERATIONS_LIMIT = 100
 
 
 def get_config(
@@ -23,9 +28,12 @@ def get_config(
         # Local endpoint: force zero pricing so AutoGen does not emit cost warnings.
         "price": [0, 0],
     }]
+    if reasoning_effort:
+        config_list[0]["reasoning_effort"] = reasoning_effort
+    if extra_body:
+        config_list[0]["extra_body"] = extra_body
 
     config = {
-        "seed": 42,
         "temperature": temperature,
         "config_list": config_list,
         "timeout": 600,
@@ -33,6 +41,4 @@ def get_config(
     }
     if max_tokens is not None:
         config["max_tokens"] = max_tokens
-    if extra_body:
-        config["extra_body"] = extra_body
     return config

@@ -1,20 +1,67 @@
 {
-  "version": 1,
   "name": "Dane Thriller",
-  "created_at": "2026-03-21 20:08:35 UTC",
+  "created_at": "2026-03-25 09:14:01 UTC",
   "endpoint_url": "http://127.0.0.1:1234/v1",
-  "outline_model": "qwen3.5-9b-uncensored-hauhaucs-aggressive",
-  "writer_model": "qwen3.5-9b-uncensored-hauhaucs-aggressive",
+  "outline_model": "omniclaw-qwen3.5-9b-claude-4.6-opus-uncensored-v2",
+  "writer_model": "omniclaw-qwen3.5-9b-claude-4.6-opus-uncensored-v2",
+  "temperature": 0.8,
   "num_chapters": 10,
-  "mode": "keep_going",
+  "token_limit_enabled": true,
+  "max_tokens": 8192,
+  "reduce_thinking": false,
+  "max_iterations": 50,
+  "chapter_target_word_count": 600,
+  "output_folder": "E:\\AI\\BookWriter\\book_output",
+  "chapter_details": {
+    "1": {
+      "beats": "- Open after midnight in the empty Helix Analytics office with Dane validating a new crash-detection model.\n- Dane catches an impossible pattern: liquidity vanishes across unrelated sectors within the same nine-minute window.\n- He reruns the backtest three different ways and gets the same result, which means the anomaly is not a simple bug.\n- A hidden service account named Janus appears in the audit trail and changes one input stream seconds before the projected crash.\n- End the chapter with Dane exporting the evidence and realizing the model predicts the collapse will begin tomorrow morning.",
+      "target_word_count": 700
+    },
+    "2": {
+      "beats": "- Dane oversleeps after working through the night and races across the city while his boss Gary keeps texting for status.\n- In the elevator lobby Dane learns the morning presentation has been expanded from a team review into an executive risk briefing.\n- Jonathan Morego pressures Dane to present only the optimistic forecast and treat the crash signal as a calibration issue.\n- Dane shows one slide that hints at the danger, and Morego immediately challenges the data source in front of the room.\n- Close on Gary quietly warning Dane that the board cares less about being right than about avoiding panic before a fundraising call.",
+      "target_word_count": 650
+    },
+    "3": {
+      "beats": "- Maya Serrano from compliance approaches Dane after the meeting because she noticed his reference to the Janus account.\n- Together they compare trading logs, model inputs, and access records and find missing timestamp blocks around every suspicious market signal.\n- Dane realizes the false calm in the official dashboard depends on one vendor feed that can be spoofed for a few seconds at a time.\n- Maya reveals that Morego pushed through an emergency data-pipeline exception over the weekend without normal approval.\n- End with Dane deciding to copy the raw logs before IT can rotate them out.",
+      "target_word_count": 600
+    },
+    "4": {
+      "beats": "- Dane returns to his desk to find his credentials partially revoked and his workstation flagged for policy review.\n- Corporate security isolates him in a glass conference room and questions why he accessed historical market snapshots outside his assigned project scope.\n- Gary tries to help but is clearly scared, which tells Dane the pressure is coming from above rather than from routine compliance.\n- After release, Dane gets home and discovers his apartment has been searched; only the backup drive with the exported logs is missing.\n- Finish on Dane realizing the threat is physical now, not just professional.",
+      "target_word_count": 650
+    },
+    "5": {
+      "beats": "- Maya sets up an off-book workspace in an empty disaster-recovery room so they can keep digging without using Dane's compromised accounts.\n- They reconstruct the missing data from cache fragments and find repeated quote stuffing in thinly traded ETFs that feed into Helix's risk clients.\n- Dane concludes someone is manufacturing instability and then selling protection products positioned to profit from the panic.\n- A source inside the exchange operations team confirms the manipulations are being routed through shell funds connected to Morego's private network.\n- End with Dane and Maya agreeing they need proof that will survive legal scrutiny, not just a theory.",
+      "target_word_count": 600
+    },
+    "6": {
+      "beats": "- Dane meets former colleague Elena Voss, now working at the market data vendor, in a crowded station cafe to compare checksum histories.\n- Elena shows that a patch pushed under emergency credentials masked microbursts of abnormal trades from downstream dashboards.\n- Before she can hand over the full patch record, two men start watching the table and Elena bails through the service exit.\n- Dane escapes with only a partial file, but it is enough to link the tampered feed to the Janus service account.\n- Close with Maya telling Dane that Helix's board has advanced the investor call to the opening bell, shrinking their window to act.",
+      "target_word_count": 600
+    },
+    "7": {
+      "beats": "- Dane and Maya build a timeline that ties the spoofed trades, the hidden account, and Morego's approvals into one coherent scheme.\n- Gary finally confesses that Morego ordered him to keep Dane contained until the firm finished placing its own defensive positions.\n- Dane learns the crash is meant to trigger a controlled panic that Helix insiders can exploit before regulators understand what happened.\n- Gary gives them access to a sealed archive server and risks his job by restoring board-call recordings.\n- End with audio proof that Morego knew the model was accurate and called the coming collapse a harvest window.",
+      "target_word_count": 700
+    },
+    "8": {
+      "beats": "- The market opens with sudden volatility in shipping, energy, and regional banks exactly as Dane's model predicted.\n- Morego moves to cut the live risk feed and frame Dane as the engineer who corrupted the forecast stack.\n- Dane and Maya split up: she prepares a regulator package while he races to stop Helix from broadcasting a falsified stability report.\n- In the server room Dane manually restores the raw feed and streams the genuine exposure map to the executive floor displays.\n- Finish on the first trading halt hitting while alarms and phone calls erupt across the building.",
+      "target_word_count": 650
+    },
+    "9": {
+      "beats": "- With the office in chaos, Dane forces a confrontation in the executive war room while board members watch the market unwind in real time.\n- Morego argues that Dane is misreading normal volatility, but Maya presents the patch history, the shell-fund links, and the recorded harvest window quote.\n- Gary backs them publicly, destroying Morego's claim that the warning was a rogue theory.\n- Morego attempts to wipe remote servers, yet Dane anticipated it and mirrored the evidence package to regulators and exchange surveillance.\n- End the chapter with security escorting Morego out as the second halt freezes trading.",
+      "target_word_count": 600
+    },
+    "10": {
+      "beats": "- After the halt, Dane works with regulators through the afternoon to explain the model, the manipulations, and the chain of custody for the evidence.\n- The crash still hits hard, but the early intervention limits the cascade and prevents a deeper systemic failure.\n- Gary faces fallout for staying silent too long, while Maya is positioned as the credible witness who kept the record intact.\n- Dane is left with the uneasy truth that his model can now see fragility before others do, making him valuable and dangerous.\n- Close on Dane receiving a new encrypted message from an unknown sender containing another impossible forecast, leaving room for a sequel.",
+      "target_word_count": 600
+    }
+  },
   "prompt_sections": {
-    "premise": "Create a story in my established writing style about Dane, a software engineer who discovers his stock prediction algorithm points to a catastrophic market crash.",
-    "storylines": "Corporate pressure around Dane's presentation.\r\nThe uncertainty over whether the model is wrong or prophetic.\r\nIntersecting finance, office politics, and personal strain.",
-    "setting": "A contemporary financial technology company in a modern city, with offices, transit, and corporate presentation rooms.",
-    "characters": "Dane: brilliant, overworked software engineer.\r\nGary: nervous boss trying to balance support and optics.\r\nJonathan Morego: skeptical executive asking hard questions.",
-    "writing_style": "Third-person limited focused on Dane. Direct and technical around code and markets, more introspective in personal moments.",
-    "tone": "Technical thriller blended with workplace drama, grounded and tense.",
-    "plot_beats": "Dane finishes the model late at night.\r\nThe model predicts a crash.\r\nHe oversleeps and races to the presentation.\r\nExecutives challenge the validity of his findings.",
-    "constraints": "Use intersecting storylines. Keep the corporate and financial details grounded in reality. Maintain tension around whether the prediction is an error.\r\nAround 1000 words per chapter."
+    "premise": "Write a grounded financial thriller about Dane Mercer, a gifted but exhausted software engineer at Helix Analytics who discovers that his stock-risk model is not merely predicting a crash but exposing a deliberate market manipulation scheme. He must decide whether to protect his career or force the truth into the open before the market opens.",
+    "storylines": "Primary thriller line: Dane investigates whether the forecasted crash is a genuine signal or a manufactured event.\nCorporate pressure line: executives want stability messaging, investor confidence, and plausible deniability.\nPartnership line: Maya Serrano from compliance becomes Dane's most important ally as trust inside the company collapses.\nBetrayal line: Gary tries to protect Dane while also protecting himself, creating ambiguous loyalty.\nSystemic stakes line: the firm is tied to a wider network of shell funds, spoofed trades, and hidden risk transfers.",
+    "setting": "Present-day Chicago centered on the glass-and-steel headquarters of Helix Analytics, commuter trains, station cafes, executive conference rooms, server rooms, and nearby financial district streets. The world should feel specific, modern, and operationally realistic, with monitors, dashboards, access logs, trade feeds, investor calls, and regulator pressure all used concretely rather than as vague tech flavor.",
+    "characters": "Dane Mercer: 34, senior software engineer, brilliant with pattern recognition, sleep deprived, stubborn, and uncomfortable with politics.\nMaya Serrano: compliance manager with forensic instincts, calm under pressure, precise with documentation, and wary of everyone.\nGary Holt: Dane's direct boss, outwardly supportive but conflict avoidant, carrying quiet guilt over earlier compromises.\nJonathan Morego: polished executive strategist who masks predatory intent behind calm skepticism.\nElena Voss: former colleague at the market-data vendor who understands the feed tampering from the outside.\nBoard members, IT security staff, exchange contacts, and regulators should feel like functional pressure points rather than filler characters.",
+    "writing_style": "Third-person limited through Dane almost all the time. Use clean, sharp prose with technical clarity around software systems, market structure, and data forensics. Keep exposition embedded in action, conversation, and observation. Let Dane's internal narration show fatigue, moral pressure, and rapid analytical leaps without turning him into a superhero.",
+    "tone": "Tense, intelligent, and grounded. The mood should blend workplace claustrophobia, financial-systems realism, and thriller escalation. Fear should come from timing, power imbalance, and the knowledge that a few hidden technical decisions can move billions of dollars.",
+    "plot_beats": "Late-night discovery of an impossible crash signature.\nMorning presentation pressure and executive pushback.\nAlliance with compliance to investigate hidden audit trails.\nRetaliation through credential locks, surveillance, and a searched apartment.\nDiscovery that spoofed trades and a tampered vendor feed are manufacturing instability.\nA narrowing deadline before the opening bell and investor call.\nProof that Morego planned to profit from the collapse.\nA live technical counterstrike during market open.\nWar-room confrontation and evidence dump to regulators.\nA partial victory that stops the worst case but reveals deeper threats.",
+    "constraints": "Keep the book at exactly 10 chapters for this config.\nRespect every chapter's required beats and target word count as mandatory guidance.\nKeep finance and engineering details plausible: audit logs, credentials, patch history, market data feeds, trading halts, and regulatory escalation should all behave believably.\nAvoid magic hacking, omniscient narration, and cartoon villains.\nMaintain cause-and-effect continuity from chapter to chapter, and do not move chapter-specific events into other chapters.\nAim for around 600 words per chapter unless a chapter-specific target overrides it."
   }
 }

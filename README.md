@@ -1,177 +1,411 @@
-# AutoGen Book Generator
+# Book Writer User Manual
 
-A Python-based system that uses AutoGen to generate complete books through collaborative AI agents. The system employs multiple specialized agents working together to create coherent, structured narratives from initial prompts.
+This project is a local browser-based control panel for generating a multi-chapter story with AutoGen agents and an OpenAI-compatible local model server such as LM Studio.
 
-## Features
+The system has two main stages:
 
-- Multi-agent collaborative writing system
-- Structured chapter generation with consistent formatting
-- Maintains story continuity and character development
-- Automated world-building and setting management
-- Support for complex, multi-chapter narratives
-- Built-in validation and error handling
+1. Generate an outline.
+2. Generate chapters from the approved outline.
 
-## Architecture
+The UI is designed so you can steer the process at checkpoints instead of running one blind batch job from start to finish.
 
-The system uses several specialized agents:
+## Quick Start
 
-- **Story Planner**: Creates high-level story arcs and plot points
-- **World Builder**: Establishes and maintains consistent settings
-- **Memory Keeper**: Tracks continuity and context
-- **Writer**: Generates the actual prose
-- **Editor**: Reviews and improves content
-- **Outline Creator**: Creates detailed chapter outlines
+1. Activate the virtual environment.
+2. Start the UI:
 
-## Installation
-
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/autogen-book-generator.git
-cd autogen-book-generator
+```powershell
+venv\Scripts\python.exe web_ui.py
 ```
 
-2. Create a virtual environment:
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+3. Open `http://127.0.0.1:8000`
 
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+On Windows you can also use:
 
-## Usage
-
-1. Basic usage:
-```python
-from main import main
-
-if __name__ == "__main__":
-    main()
-```
-
-2. Browser control panel:
-```bash
-python web_ui.py
-```
-
-Then open `http://127.0.0.1:8000` in your browser. The UI lets you:
-- start a run with structured prompt sections and chapter count
-- choose an outline model and writer model independently
-- refresh the available model list from the configured API endpoint
-- save and load reusable generation configs as JSON
-- review and approve the outline before chapter generation starts
-- attach chapter-specific improvement notes
-- regenerate an individual chapter using its saved notes
-- inspect continuity summaries, character/world notes, and progress events
-- toggle between `Keep Going` and `Ask for Advice`
-- queue guidance for the next checkpoint
-- continue or stop the run from the browser
-
-The current implementation pauses at checkpoints after the outline and after each generated chapter, which gives you a place to steer the next step without fighting the console.
-
-On Windows, you can also use:
 ```bat
 Launch Web UI.bat
 ```
 
-This starts the local server and opens the browser automatically.
+## What The System Does
 
-2. Custom initial prompt:
-```python
-from config import get_config
-from agents import BookAgents
-from book_generator import BookGenerator
-from outline_generator import OutlineGenerator
+The app coordinates several agent roles:
 
-# Get configuration
-agent_config = get_config()
+- `story_planner`: shapes plot structure
+- `world_builder`: keeps setting/world details coherent
+- `outline_creator`: turns the story setup into a chapter outline
+- `memory_keeper`: tracks continuity during chapter writing
+- `writer`: writes the prose
+- `editor`: critiques and revises the prose
 
-# Create agents
-outline_agents = BookAgents(agent_config)
-agents = outline_agents.create_agents()
+The browser UI is live. It updates phase, active agent, step, progress timeline, chapter status, outline state, and saved chapter text automatically.
 
-# Generate outline
-outline_gen = OutlineGenerator(agents, agent_config)
-outline = outline_gen.generate_outline(your_prompt, num_chapters=25)
+## Main Workflow
 
-# Initialize book generator
-book_agents = BookAgents(agent_config, outline)
-agents_with_context = book_agents.create_agents()
-book_gen = BookGenerator(agents_with_context, agent_config, outline)
+1. Fill in the run setup fields.
+2. Press `Start Run`.
+3. The app generates an outline.
+4. Review the outline.
+5. Either:
+   - approve it
+   - add outline feedback and regenerate it
+6. After approval, chapter generation begins.
+7. At checkpoints, the app either continues automatically or waits for you, depending on the current mode.
 
-# Generate book
-book_gen.generate_book(outline)
+## Controls
+
+These are the buttons at the top of the left panel.
+
+### `Start Run`
+
+Starts a new run using the current form values.
+
+### `Keep Going`
+
+The run continues automatically through checkpoints.
+
+Use this when you want the system to:
+
+- generate the outline
+- pause only if approval is required
+- keep writing chapters without waiting after each one
+
+### `Ask for Advice`
+
+The run pauses at the next checkpoint and waits for you.
+
+A checkpoint is normally:
+
+- outline ready for review
+- chapter complete
+- chapter regeneration complete
+
+Use this when you want to inspect the latest result, add guidance, then continue manually.
+
+### `Continue`
+
+Resumes the run when it is already waiting at a checkpoint.
+
+### `Pause`
+
+Requests a pause at the next checkpoint. It does not kill the current generation mid-response. The phase label changes to `Pausing at the next checkpoint`, then to `Paused` once the run actually reaches a safe pause point.
+
+## Run Setup
+
+### API Endpoint
+
+The OpenAI-compatible local endpoint. Default:
+
+```text
+http://127.0.0.1:1234/v1
 ```
 
-## Configuration
+### Refresh Models
 
-The system can be configured through `config.py`. Key configurations include:
+Queries the endpoint’s `/models` route and repopulates the model dropdowns.
 
-- LLM endpoint URL
-- Number of chapters
-- Agent parameters
-- Output directory settings
+### Outline Model
 
-## Output Structure
+The model used for outline generation.
 
-Generated content is saved in the `book_output` directory:
+### Writer Model
+
+The model used for chapter generation.
+
+### Temperature
+
+Controls generation randomness. Current default is `0.8`.
+
+### Prompt Sections
+
+These fields build the master story setup:
+
+- `Premise`
+- `Storylines / Arcs`
+- `Setting / World`
+- `Characters`
+- `Writing Style`
+- `Tone`
+- `Important Plot Beats`
+- `Constraints / Must Include`
+
+Each textarea has a small `Expand` button that opens a large editor modal for easier editing.
+
+### Chapter Target Word Count
+
+Global target word count for chapters.
+
+- If a chapter does not have its own target word count, this value is used.
+- If this is `0`, no global chapter word target is enforced.
+
+### Number of Chapters
+
+Controls how many chapter detail editors appear below it.
+
+### Chapter Details
+
+Each chapter has:
+
+- `Chapter N Details`
+- `Chapter N Target Word Count`
+
+`Chapter N Details` is where you put the required beats or events for that specific chapter.
+
+The system uses these chapter details in two places:
+
+- outline generation
+- chapter writing and editing
+
+If chapter details exist, the editor performs an extra compliance check and is expected to verify that the chapter follows those details in order.
+
+If a chapter-specific target word count is `0`, the global `Chapter Target Word Count` is used instead.
+
+### Token Limit
+
+If `On`, the system sends `max_tokens` with the request.
+
+If `Off`, the `Max Tokens` field is hidden and no explicit token cap is sent.
+
+Current default max token setting is `8192`.
+
+### Max Iterations
+
+Maximum writer/editor iteration budget for chapter generation. Current default is `5`.
+
+### Thinking Mode
+
+Options:
+
+- `Normal`
+- `No Thinking`
+
+`No Thinking` currently tries to send:
+
+```json
+{
+  "extra_body": {
+    "enable_thinking": false
+  }
+}
 ```
-book_output/
-├── outline.txt
-├── chapter_01.txt
-├── chapter_02.txt
-└── ...
+
+This is aimed at LM Studio style backends. Whether it works depends on how the local server forwards that request shape to the model backend.
+
+## Configs
+
+There are two kinds of config loading and saving.
+
+### Save Config
+
+Saves the current setup into the project’s `saved_configs` folder.
+
+Loading a saved config also fills the config name field so saving again overwrites the same setup name.
+
+### Load Saved Setup
+
+Loads a config previously saved inside the app.
+
+### Load External Config
+
+Lets you choose a JSON file from anywhere on disk and load it once. It does not automatically copy that file into the project’s internal saved-config folder.
+
+### Save External Config
+
+Downloads the current setup as a JSON file directly from the browser.
+
+## Config Format
+
+The current config format is JSON and centers around structured setup data. Example:
+
+```json
+{
+  "name": "Corporate Thriller Draft",
+  "created_at": "2026-03-22 12:00:00 UTC",
+  "endpoint_url": "http://127.0.0.1:1234/v1",
+  "outline_model": "nemomix-unleashed-12b",
+  "writer_model": "nemomix-unleashed-12b",
+  "temperature": 0.8,
+  "num_chapters": 10,
+  "token_limit_enabled": true,
+  "max_tokens": 8192,
+  "reduce_thinking": false,
+  "max_iterations": 5,
+  "chapter_target_word_count": 1800,
+  "output_folder": "E:\\AI\\BookWriter\\book_output",
+  "chapter_details": {
+    "1": {
+      "beats": "Dane finishes the model and discovers the crash signal.",
+      "target_word_count": 2000
+    },
+    "2": {
+      "beats": "Dane oversleeps and rushes to the office.",
+      "target_word_count": 0
+    }
+  },
+  "prompt_sections": {
+    "premise": "...",
+    "storylines": "...",
+    "setting": "...",
+    "characters": "...",
+    "writing_style": "...",
+    "tone": "...",
+    "plot_beats": "...",
+    "constraints": "..."
+  }
+}
 ```
 
-## Requirements
+Note:
 
-- Python 3.8+
-- AutoGen 0.2.0+
-- Other dependencies listed in requirements.txt
+- `mode` is not stored in configs
+- `version` is not stored in configs
 
-## Development
+## Outline Approval
 
-To contribute to the project:
+After the outline is generated, the system enters an approval gate.
 
-1. Fork the repository
-2. Create a new branch for your feature
-3. Install development dependencies:
-```bash
-pip install -r requirements.txt
+You can then:
+
+- read the outline
+- type into `Outline Feedback`
+- press `Save Feedback`
+- press `Regenerate Outline`
+- or press `Approve Outline`
+
+The run does not continue to chapter writing until the outline is approved.
+
+## Advice
+
+The `Advice` box queues guidance for the next checkpoint-driven step.
+
+Examples:
+
+- make Dane less confident here
+- slow the pacing in chapter 3
+- foreshadow the executive conflict earlier
+
+This advice is not the same as the saved story setup. It is short-term steering for the next part of the run.
+
+## Regenerate Chapter
+
+`Regenerate Chapter` reruns a specific chapter using:
+
+- the approved outline
+- the current global setup
+- the current chapter’s details
+- the current generation settings
+
+Use this after the outline has been approved.
+
+## Live Panels
+
+### Live Progress
+
+Shows:
+
+- current agent
+- current step
+- iteration counter
+- output stage
+- progress detail
+- progress timeline
+
+### Checkpoint Review
+
+Shows the current checkpoint title and its content.
+
+### Outline
+
+Shows the latest parsed outline text.
+
+### Last Advice
+
+Shows the last queued advice string.
+
+### Chapter Artifacts
+
+Shows draft, editor feedback, and final scene artifacts for the currently active chapter when available.
+
+### Continuity Panel
+
+Shows story-memory style summaries such as:
+
+- chapter summaries
+- characters
+- world details
+- continuity alerts
+
+### Chapters
+
+The chapter list at the bottom updates live.
+
+- pending chapters are italic
+- completed chapters are bold
+- written chapters can be expanded so you can read them in the UI
+
+## Sounds And Visual Feedback
+
+The UI uses different cues:
+
+- soft cue for agent handoffs
+- stronger completion cue for chapter completion
+- warning cue when the run enters a waiting-for-user-input state
+
+The phase line also includes a spinner while the system is actively generating.
+
+## Output Files
+
+Generated outline and chapters are written to:
+
+```text
+E:\AI\BookWriter\book_output
 ```
-4. Make your changes
-5. Run tests:
-```bash
-pytest
+
+Typical outputs:
+
+- `outline.txt`
+- `chapter_01.txt`
+- `chapter_02.txt`
+
+## Command Window Output
+
+The command window prints live agent activity and tracebacks.
+
+This is useful for:
+
+- seeing which agent is currently speaking
+- debugging generation failures
+- confirming whether a local backend actually received a request
+
+## Common Issues
+
+### Start Run fails immediately
+
+Likely causes:
+
+- invalid model config shape
+- unsupported request fields on the local backend
+- the UI server is still running old code and needs a restart
+
+### Outline becomes `[To be determined]`
+
+This usually means the model returned something the outline parser could only partially salvage, or too many chapters were missing/malformed.
+
+The current parser tries to preserve valid chapters and fill only the missing ones, but smaller local models can still struggle with strict chapter formatting.
+
+### `No Thinking` does nothing
+
+That depends on LM Studio or the backend behind it. The app can send the flag, but the server must support it and forward it correctly.
+
+### The UI is live but a text field should not be overwritten
+
+The UI is designed to avoid overwriting focused or dirty inputs. Explicit config loads still resync the form on purpose.
+
+## Development Notes
+
+Useful commands:
+
+```powershell
+venv\Scripts\python.exe -m py_compile config.py generation_controller.py web_ui.py book_generator.py agents.py outline_generator.py
 ```
-6. Submit a pull request
 
-## Error Handling
-
-The system includes robust error handling:
-- Validates chapter completeness
-- Ensures proper formatting
-- Maintains backup copies of generated content
-- Implements retry logic for failed generations
-
-## Limitations
-
-- Requires significant computational resources
-- Generation time increases with chapter count
-- Quality depends on the underlying LLM model
-- May require manual review for final polish
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- Built using the [AutoGen](https://github.com/microsoft/autogen) framework
-- Inspired by collaborative writing systems
+That is the fastest basic syntax check after changes.

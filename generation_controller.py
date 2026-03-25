@@ -13,7 +13,7 @@ from urllib.request import urlopen
 
 from agents import BookAgents
 from book_generator import BookGenerator
-from config import DEFAULT_BASE_URL, DEFAULT_MODEL, OUTPUT_FOLDER, get_config
+from config import DEFAULT_BASE_URL, DEFAULT_MODEL, MAX_ITERATIONS_LIMIT, OUTPUT_FOLDER, get_config
 from outline_generator import OutlineGenerator
 
 
@@ -114,6 +114,7 @@ class RunSnapshot:
     max_iterations: int = 5
     chapter_target_word_count: int = 0
     output_folder: str = OUTPUT_FOLDER
+    config_name: str = ""
     chapter_details: Dict[int, Dict[str, object]] = field(default_factory=dict)
     phase_version: int = 0
     prompt_sections: PromptSections = field(default_factory=PromptSections)
@@ -139,12 +140,41 @@ class GenerationController:
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._thread: Optional[threading.Thread] = None
+        self._diagnostic_log_lock = threading.RLock()
+        self._diagnostic_log_path: Optional[str] = None
         self._state = RunSnapshot()
         self._pending_advice: List[str] = []
         self._resume_requested = False
         os.makedirs(CONFIG_DIR, exist_ok=True)
         self._refresh_saved_configs()
         self.refresh_models()
+
+    def _initialize_output_log(self, output_folder: str) -> None:
+        os.makedirs(output_folder, exist_ok=True)
+        path = os.path.join(output_folder, "outputlog.txt")
+        with self._diagnostic_log_lock:
+            self._diagnostic_log_path = path
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(f"BookWriter diagnostic log started {_utc_timestamp()}\n")
+
+    def _append_output_log(self, message: str) -> None:
+        with self._diagnostic_log_lock:
+            path = self._diagnostic_log_path
+        if not path:
+            return
+        text = message if message.endswith("\n") else message + "\n"
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+
+    def _log_runtime(self, message: str) -> None:
+        print(message)
+        self._append_output_log(message)
+
+    def _log_runtime_block(self, header: str, content: str) -> None:
+        body = (content or "").rstrip() or "[empty]"
+        divider = "=" * 20
+        self._log_runtime(f"{divider} {header} {divider}\n{body}\n{divider} END {header} {divider}")
 
     def get_snapshot(self) -> RunSnapshot:
         with self._lock:
@@ -175,6 +205,7 @@ class GenerationController:
                 max_iterations=self._state.max_iterations,
                 chapter_target_word_count=self._state.chapter_target_word_count,
                 output_folder=self._state.output_folder,
+                config_name=self._state.config_name,
                 chapter_details={number: dict(details) for number, details in self._state.chapter_details.items()},
                 phase_version=self._state.phase_version,
                 prompt_sections=PromptSections(**self._state.prompt_sections.__dict__),
@@ -257,6 +288,38 @@ class GenerationController:
             if block.split(":\n", 1)[1].strip()
         )
 
+    def _build_run_prompt(self, sections: PromptSections, chapter_target_word_count: int) -> str:
+        prompt = self.build_prompt(sections)
+        if chapter_target_word_count > 0:
+            prompt = f"{prompt}\n\nChapter Target Word Count:\n{chapter_target_word_count}"
+        return prompt
+
+    def _build_outline_prompt(
+        self,
+        sections: PromptSections,
+        chapter_details: Dict[int, Dict[str, object]],
+        chapter_target_word_count: int,
+    ) -> str:
+        prompt = self._build_run_prompt(sections, chapter_target_word_count)
+        chapter_details_text = self._render_chapter_details(chapter_details)
+        if chapter_details_text:
+            prompt = "\n\n".join([
+                prompt,
+                "Mandatory Chapter Beat Anchors:",
+                "If chapter details or explicit chapter beats are provided below, they are binding requirements.",
+                "When shaping the story arc and later outline, do not ignore them, relocate them to different chapters, merge them away, soften them into vague summaries, or contradict them.",
+                "Treat each chapter's provided beats as fixed anchors that the story arc must preserve and support.",
+                f"Chapter Details:\n{chapter_details_text}",
+            ])
+        return prompt
+
+    def _normalize_max_iterations(self, max_iterations: int) -> int:
+        try:
+            value = int(max_iterations)
+        except (TypeError, ValueError):
+            value = 5
+        return max(1, min(MAX_ITERATIONS_LIMIT, value))
+
     def _normalize_chapter_details(self, chapter_details: Dict | List | None, num_chapters: int) -> Dict[int, Dict[str, object]]:
         normalized: Dict[int, Dict[str, object]] = {}
         if not chapter_details:
@@ -305,6 +368,65 @@ class GenerationController:
             parts.append("\n".join(section_parts))
         return "\n\n".join(parts)
 
+    def _write_outline_file(self, outline_text: str, output_folder: str) -> None:
+        if not outline_text.strip():
+            return
+        os.makedirs(output_folder, exist_ok=True)
+        path = os.path.join(output_folder, "outline.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(outline_text)
+
+    def _persist_config_payload(self, safe_name: str, payload: Dict) -> None:
+        path = os.path.join(CONFIG_DIR, f"{safe_name}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        with self._lock:
+            self._state.config_name = safe_name
+            self._refresh_saved_configs()
+            self._append_event(f"{_utc_timestamp()} - Saved config {safe_name}")
+
+    def save_config_data(
+        self,
+        name: str,
+        prompt_sections: PromptSections,
+        chapter_details: Dict[int, Dict[str, object]],
+        num_chapters: int,
+        endpoint_url: str,
+        outline_model: str,
+        writer_model: str,
+        temperature: float,
+        token_limit_enabled: bool,
+        max_tokens: int,
+        reduce_thinking: bool,
+        max_iterations: int,
+        chapter_target_word_count: int,
+    ) -> None:
+        safe_name = "".join(ch for ch in name.strip() if ch.isalnum() or ch in (" ", "-", "_")).strip()
+        if not safe_name:
+            return
+        normalized_chapter_details = self._normalize_chapter_details(chapter_details, num_chapters)
+        normalized_max_iterations = self._normalize_max_iterations(max_iterations)
+        with self._lock:
+            output_folder = self._state.output_folder or OUTPUT_FOLDER
+        payload = {
+            "name": safe_name,
+            "created_at": _utc_timestamp(),
+            "endpoint_url": endpoint_url.strip() or DEFAULT_BASE_URL,
+            "outline_model": outline_model or DEFAULT_MODEL,
+            "writer_model": writer_model or DEFAULT_MODEL,
+            "temperature": temperature,
+            "num_chapters": max(1, num_chapters),
+            "token_limit_enabled": token_limit_enabled,
+            "max_tokens": max_tokens,
+            "reduce_thinking": reduce_thinking,
+            "max_iterations": normalized_max_iterations,
+            "chapter_target_word_count": max(0, chapter_target_word_count),
+            "output_folder": output_folder,
+            "chapter_details": {str(key): value for key, value in normalized_chapter_details.items()},
+            "prompt_sections": asdict(prompt_sections),
+        }
+        self._persist_config_payload(safe_name, payload)
+
     def start_run(
         self,
         prompt_sections: PromptSections,
@@ -325,15 +447,12 @@ class GenerationController:
                 return False
 
             normalized_chapter_details = self._normalize_chapter_details(chapter_details, num_chapters)
-            prompt = self.build_prompt(prompt_sections)
-            if chapter_target_word_count > 0:
-                prompt = f"{prompt}\n\nChapter Target Word Count:\n{chapter_target_word_count}"
-            chapter_details_text = self._render_chapter_details(normalized_chapter_details)
-            if chapter_details_text:
-                prompt = f"{prompt}\n\nChapter Details:\n{chapter_details_text}"
+            normalized_max_iterations = self._normalize_max_iterations(max_iterations)
+            prompt = self._build_run_prompt(prompt_sections, chapter_target_word_count)
             prior_mode = self._state.mode
             available_models = list(self._state.available_models)
             saved_configs = list(self._state.saved_configs)
+            config_name = self._state.config_name
             chapters = [ChapterStatus(number=i, title=f"Chapter {i}") for i in range(1, num_chapters + 1)]
             chapter_reviews = {i: ChapterReviewState() for i in range(1, num_chapters + 1)}
             self._state = RunSnapshot(
@@ -354,9 +473,10 @@ class GenerationController:
                 token_limit_enabled=token_limit_enabled,
                 max_tokens=max_tokens,
                 reduce_thinking=reduce_thinking,
-                max_iterations=max_iterations,
+                max_iterations=normalized_max_iterations,
                 chapter_target_word_count=max(0, chapter_target_word_count),
                 output_folder=self._state.output_folder,
+                config_name=config_name,
                 chapter_details=normalized_chapter_details,
                 prompt_sections=prompt_sections,
                 chapters=chapters,
@@ -399,12 +519,7 @@ class GenerationController:
             "chapter_details": {str(key): value for key, value in snapshot.chapter_details.items()},
             "prompt_sections": asdict(snapshot.prompt_sections),
         }
-        path = os.path.join(CONFIG_DIR, f"{safe_name}.json")
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-        with self._lock:
-            self._refresh_saved_configs()
-            self._append_event(f"{_utc_timestamp()} - Saved config {safe_name}")
+        self._persist_config_payload(safe_name, payload)
 
     def load_config(self, filename: str) -> None:
         path = os.path.join(CONFIG_DIR, filename)
@@ -412,6 +527,7 @@ class GenerationController:
             return
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
+        payload.setdefault("name", os.path.splitext(filename)[0])
         self.load_config_payload(payload, f"Loaded config {filename}")
 
     def load_config_payload(self, payload: Dict, event_label: str = "Loaded external config") -> None:
@@ -432,16 +548,12 @@ class GenerationController:
             self._state.token_limit_enabled = bool(payload.get("token_limit_enabled", self._state.token_limit_enabled))
             self._state.max_tokens = int(payload.get("max_tokens", self._state.max_tokens))
             self._state.reduce_thinking = bool(payload.get("reduce_thinking", self._state.reduce_thinking))
-            self._state.max_iterations = int(payload.get("max_iterations", self._state.max_iterations))
+            self._state.max_iterations = self._normalize_max_iterations(payload.get("max_iterations", self._state.max_iterations))
             self._state.chapter_target_word_count = int(payload.get("chapter_target_word_count", self._state.chapter_target_word_count))
             self._state.output_folder = payload.get("output_folder", self._state.output_folder) or OUTPUT_FOLDER
+            self._state.config_name = str(payload.get("name", self._state.config_name or "")).strip()
             self._state.chapter_details = chapter_details
-            self._state.prompt = self.build_prompt(sections)
-            if self._state.chapter_target_word_count > 0:
-                self._state.prompt = f"{self._state.prompt}\n\nChapter Target Word Count:\n{self._state.chapter_target_word_count}"
-            chapter_details_text = self._render_chapter_details(chapter_details)
-            if chapter_details_text:
-                self._state.prompt = f"{self._state.prompt}\n\nChapter Details:\n{chapter_details_text}"
+            self._state.prompt = self._build_run_prompt(sections, self._state.chapter_target_word_count)
             self._state.chapters = [
                 ChapterStatus(number=i, title=f"Chapter {i}")
                 for i in range(1, self._state.num_chapters + 1)
@@ -666,9 +778,14 @@ class GenerationController:
     def _outline_to_text(self, outline: List[Dict]) -> str:
         parts: List[str] = []
         for chapter in outline:
+            prompt = chapter.get("prompt", "")
+            if isinstance(prompt, list):
+                prompt = "\n".join(str(item).strip() for item in prompt if str(item).strip())
+            else:
+                prompt = str(prompt).strip()
             parts.append(f"Chapter {chapter['chapter_number']}: {chapter['title']}")
             parts.append("-" * 50)
-            parts.append(chapter["prompt"])
+            parts.append(prompt)
             parts.append("")
         return "\n".join(parts).strip()
 
@@ -799,26 +916,51 @@ class GenerationController:
                 max_iterations = self._state.max_iterations
                 chapter_target_word_count = self._state.chapter_target_word_count
                 output_folder = self._state.output_folder
+            self._initialize_output_log(output_folder)
             requested_max_tokens = max_tokens if token_limit_enabled else None
             extra_body = {
+                "thinking": False,
                 "enable_thinking": False,
             } if reduce_thinking else None
+            reasoning_effort = "low" if reduce_thinking else None
             if extra_body:
-                print(f"[generation_controller] Using extra_body: {extra_body}")
-            prompt = self.build_prompt(prompt_sections)
-            if chapter_target_word_count > 0:
-                prompt = f"{prompt}\n\nChapter Target Word Count:\n{chapter_target_word_count}"
-            chapter_details_text = self._render_chapter_details(chapter_details)
-            if chapter_details_text:
-                prompt = f"{prompt}\n\nChapter Details:\n{chapter_details_text}"
+                self._log_runtime(
+                    "[generation_controller] Using no-thinking settings: "
+                    f"extra_body={extra_body}, reasoning_effort={reasoning_effort}"
+                )
+            prompt = self._build_run_prompt(prompt_sections, chapter_target_word_count)
+            outline_prompt = self._build_outline_prompt(
+                prompt_sections,
+                chapter_details,
+                chapter_target_word_count,
+            )
+            self._log_runtime_block(
+                "RUN SETTINGS",
+                "\n".join([
+                    f"endpoint_url: {endpoint_url}",
+                    f"outline_model: {outline_model}",
+                    f"writer_model: {writer_model}",
+                    f"temperature: {temperature}",
+                    f"token_limit_enabled: {token_limit_enabled}",
+                    f"max_tokens: {requested_max_tokens}",
+                    f"reduce_thinking: {reduce_thinking}",
+                    f"reasoning_effort: {reasoning_effort}",
+                    f"max_iterations: {max_iterations}",
+                    f"chapter_target_word_count: {chapter_target_word_count}",
+                    f"output_folder: {output_folder}",
+                    f"num_chapters: {num_chapters}",
+                ]),
+            )
+            self._log_runtime_block("RUN INPUT | BASE PROMPT", prompt)
+            self._log_runtime_block("RUN INPUT | OUTLINE PROMPT", outline_prompt)
             approved_outline: List[Dict] = []
             while True:
                 with self._lock:
                     outline_feedback = self._state.outline_feedback
-                outline_prompt = prompt
+                current_outline_prompt = outline_prompt
                 if outline_feedback:
-                    outline_prompt = (
-                        f"{prompt}\n\nOutline revision feedback from the human reviewer:\n"
+                    current_outline_prompt = (
+                        f"{outline_prompt}\n\nOutline revision feedback from the human reviewer:\n"
                         f"{outline_feedback}\n\nRegenerate the outline and address this feedback."
                     )
                 self._set_progress(
@@ -836,17 +978,20 @@ class GenerationController:
                     model=outline_model,
                     temperature=temperature,
                     max_tokens=requested_max_tokens,
+                    reasoning_effort=reasoning_effort,
                     extra_body=extra_body,
                 )
                 outline_agents = BookAgents(outline_config)
-                agents = outline_agents.create_agents(outline_prompt, num_chapters)
+                agents = outline_agents.create_agents(current_outline_prompt, num_chapters)
                 outline_generator = OutlineGenerator(
                     agents,
                     outline_config,
                     progress_callback=self._progress_callback,
+                    diagnostic_logger=self._append_output_log,
                 )
-                outline = outline_generator.generate_outline(outline_prompt, num_chapters)
+                outline = outline_generator.generate_outline(current_outline_prompt, num_chapters)
                 outline_text = self._outline_to_text(outline)
+                self._write_outline_file(outline_text, output_folder)
                 with self._lock:
                     self._state.outline_text = outline_text
                     self._state.phase = "Outline complete"
@@ -877,6 +1022,7 @@ class GenerationController:
                 model=writer_model,
                 temperature=temperature,
                 max_tokens=requested_max_tokens,
+                reasoning_effort=reasoning_effort,
                 extra_body=extra_body,
             )
             book_agents = BookAgents(writer_config, outline)
@@ -885,8 +1031,10 @@ class GenerationController:
                 chapter_agents,
                 writer_config,
                 outline,
+                output_dir=output_folder,
                 max_iterations=max_iterations,
                 progress_callback=self._progress_callback,
+                diagnostic_logger=self._append_output_log,
             )
             for chapter in outline:
                 if self._state.stop_requested:
@@ -935,9 +1083,12 @@ class GenerationController:
             trace = traceback.format_exc()
             error_message = _format_exception(exc)
             if self._state.reduce_thinking:
-                error_message = f"{error_message} | No Thinking extra_body={{'enable_thinking': False}}"
-            print("\n[generation_controller] Run failed")
-            print(trace)
+                error_message = (
+                    f"{error_message} | No Thinking payload="
+                    "{'thinking': False, 'enable_thinking': False, 'reasoning_effort': 'low'}"
+                )
+            self._log_runtime("\n[generation_controller] Run failed")
+            self._log_runtime(trace.rstrip())
             with self._lock:
                 if 1 <= self._state.current_chapter <= len(self._state.chapters):
                     self._state.chapters[self._state.current_chapter - 1].status = "failed"
@@ -960,12 +1111,34 @@ class GenerationController:
                 output_folder = self._state.output_folder
                 self._state.phase = f"Regenerating chapter {chapter_number}"
                 self._state.phase_version += 1
+            self._initialize_output_log(output_folder)
             requested_max_tokens = max_tokens if token_limit_enabled else None
             extra_body = {
+                "thinking": False,
                 "enable_thinking": False,
             } if reduce_thinking else None
+            reasoning_effort = "low" if reduce_thinking else None
             if extra_body:
-                print(f"[generation_controller] Using extra_body: {extra_body}")
+                self._log_runtime(
+                    "[generation_controller] Using no-thinking settings: "
+                    f"extra_body={extra_body}, reasoning_effort={reasoning_effort}"
+                )
+            self._log_runtime_block(
+                f"CHAPTER REGEN SETTINGS | CHAPTER {chapter_number}",
+                "\n".join([
+                    f"endpoint_url: {endpoint_url}",
+                    f"writer_model: {writer_model}",
+                    f"temperature: {temperature}",
+                    f"token_limit_enabled: {token_limit_enabled}",
+                    f"max_tokens: {requested_max_tokens}",
+                    f"reduce_thinking: {reduce_thinking}",
+                    f"reasoning_effort: {reasoning_effort}",
+                    f"max_iterations: {max_iterations}",
+                    f"chapter_target_word_count: {chapter_target_word_count}",
+                    f"output_folder: {output_folder}",
+                ]),
+            )
+            self._log_runtime_block(f"CHAPTER REGEN INPUT | BASE PROMPT | CHAPTER {chapter_number}", prompt)
             outline = self._parse_outline()
             if not outline:
                 raise ValueError("No approved outline available for regeneration")
@@ -974,6 +1147,7 @@ class GenerationController:
                 model=writer_model,
                 temperature=temperature,
                 max_tokens=requested_max_tokens,
+                reasoning_effort=reasoning_effort,
                 extra_body=extra_body,
             )
             book_agents = BookAgents(writer_config, outline)
@@ -982,8 +1156,10 @@ class GenerationController:
                 chapter_agents,
                 writer_config,
                 outline,
+                output_dir=output_folder,
                 max_iterations=max_iterations,
                 progress_callback=self._progress_callback,
+                diagnostic_logger=self._append_output_log,
             )
             chapter = next((item for item in outline if item["chapter_number"] == chapter_number), None)
             if not chapter:
@@ -1017,9 +1193,12 @@ class GenerationController:
             trace = traceback.format_exc()
             error_message = _format_exception(exc)
             if self._state.reduce_thinking:
-                error_message = f"{error_message} | No Thinking extra_body={{'enable_thinking': False}}"
-            print(f"\n[generation_controller] Chapter {chapter_number} regeneration failed")
-            print(trace)
+                error_message = (
+                    f"{error_message} | No Thinking payload="
+                    "{'thinking': False, 'enable_thinking': False, 'reasoning_effort': 'low'}"
+                )
+            self._log_runtime(f"\n[generation_controller] Chapter {chapter_number} regeneration failed")
+            self._log_runtime(trace.rstrip())
             self._set_chapter_status(chapter_number, "failed")
             self._mark_finished("failed", f"Chapter {chapter_number} regeneration failed", error_message)
             with self._lock:

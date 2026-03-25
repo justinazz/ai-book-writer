@@ -10,6 +10,7 @@ import socket
 from typing import Dict
 from urllib.parse import parse_qs
 
+from config import MAX_ITERATIONS_LIMIT
 from generation_controller import GenerationController, PromptSections
 
 
@@ -84,6 +85,7 @@ def _render_page() -> bytes:
     current_artifacts = _render_artifacts(current_review) if current_review else "No chapter artifacts yet."
     outline_feedback = snapshot.outline_feedback or ""
     recent_events_text = "\n".join(snapshot.recent_events) or "No events yet."
+    config_name = snapshot.config_name or ""
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -181,6 +183,11 @@ def _render_page() -> bytes:
     button:disabled {{
       cursor: not-allowed;
       opacity: 0.5;
+    }}
+    .helper-note {{
+      margin-top: 10px;
+      font-size: 0.94rem;
+      color: var(--muted);
     }}
     .meta {{
       display: grid;
@@ -286,6 +293,52 @@ def _render_page() -> bytes:
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 16px;
     }}
+    .textarea-toolbar {{
+      display: flex;
+      justify-content: flex-end;
+      margin: 6px 0 12px;
+    }}
+    .expand-textarea-button {{
+      padding: 6px 10px;
+      font-size: 0.88rem;
+      background: var(--accent-3);
+    }}
+    .modal-backdrop {{
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(18, 26, 30, 0.62);
+      z-index: 999;
+      padding: 24px;
+      box-sizing: border-box;
+    }}
+    .modal-backdrop.open {{
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }}
+    .modal-dialog {{
+      width: min(980px, 100%);
+      max-height: 92vh;
+      overflow: auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.24);
+      padding: 16px;
+    }}
+    .modal-header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }}
+    .modal-header h2 {{
+      margin: 0;
+    }}
+    #textarea-modal-input {{
+      min-height: 65vh;
+    }}
     @keyframes phaseflash {{
       0% {{ background: var(--flash); }}
       100% {{ background: #fffdf8; }}
@@ -316,6 +369,7 @@ def _render_page() -> bytes:
       <div class="panel">
         <h2>Controls</h2>
         <div class="controls">
+          <button id="start-button" type="submit" form="run-setup-form" {"disabled" if not can_start else ""}>&#9889; Start Run</button>
           <form method="post" action="/mode" class="async-form">
             <input type="hidden" name="mode" value="keep_going">
             <button id="keep-going-button" class="secondary" {"disabled" if not can_control else ""}>&#9654; Keep Going</button>
@@ -331,9 +385,12 @@ def _render_page() -> bytes:
             <button id="stop-button" class="danger" {"disabled" if not can_control else ""}>&#9208; Pause</button>
           </form>
         </div>
+        <div class="card helper-note">
+          <strong>Ask for Advice</strong> pauses at the next checkpoint so you can review the outline or latest chapter, add guidance, and then continue.
+        </div>
 
         <h2 style="margin-top: 18px;">Run Setup</h2>
-        <form method="post" action="/start" class="async-form">
+        <form id="run-setup-form" method="post" action="/start" class="async-form">
           <label class="label" for="endpoint_url">API Endpoint</label>
           <input id="endpoint_url" type="text" name="endpoint_url" value="{escape(snapshot.endpoint_url)}">
           <div class="controls">
@@ -381,21 +438,18 @@ def _render_page() -> bytes:
             <input id="max_tokens" type="number" min="128" max="64000" name="max_tokens" value="{snapshot.max_tokens}">
           </div>
           <label class="label" for="max_iterations">Max Iterations</label>
-          <input id="max_iterations" type="number" min="1" max="10" name="max_iterations" value="{snapshot.max_iterations}">
+          <input id="max_iterations" type="number" min="1" max="{MAX_ITERATIONS_LIMIT}" name="max_iterations" value="{snapshot.max_iterations}">
           <label class="label" for="reduce_thinking">Thinking Mode</label>
           <select id="reduce_thinking" name="reduce_thinking">
             <option value="off"{" selected" if not snapshot.reduce_thinking else ""}>Normal</option>
             <option value="on"{" selected" if snapshot.reduce_thinking else ""}>No Thinking</option>
           </select>
-          <div class="controls">
-            <button id="start-button" {"disabled" if not can_start else ""}>&#9889; Start Run</button>
-          </div>
         </form>
 
         <h2 style="margin-top: 18px;">Configs</h2>
         <form method="post" action="/save-config" class="async-form">
           <label class="label" for="config_name">Save Current Setup</label>
-          <input id="config_name" type="text" name="config_name" placeholder="Example: Dane thriller v1">
+          <input id="config_name" type="text" name="config_name" placeholder="Example: Dane thriller v1" value="{escape(config_name)}">
           <div class="controls">
             <button class="secondary">&#128190; Save Config</button>
           </div>
@@ -509,6 +563,15 @@ def _render_page() -> bytes:
       </div>
     </section>
   </div>
+  <div id="textarea-modal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="textarea-modal-title">Expanded Editor</h2>
+        <button type="button" id="textarea-modal-close" class="secondary">&#10005; Close</button>
+      </div>
+      <textarea id="textarea-modal-input" aria-label="Expanded editor"></textarea>
+    </div>
+  </div>
   <script>
     let lastPhaseVersion = {snapshot.phase_version};
     function escapeHtml(value) {{
@@ -601,6 +664,57 @@ def _render_page() -> bytes:
     let lastAgent = {json.dumps(snapshot.progress.current_agent or "")};
     let lastKnownState = {json.dumps(_snapshot_payload(snapshot))};
     let lastWaitingForInput = {json.dumps(snapshot.waiting_for_input)};
+    let lastCompletionSignal = {json.dumps((f"phase:{snapshot.phase}" if snapshot.phase == "Generation complete" else f"checkpoint:{snapshot.current_checkpoint_title}") if (snapshot.current_checkpoint_title or snapshot.phase == "Generation complete") else "")};
+    let activeModalSourceId = "";
+    function modalSource() {{
+      return activeModalSourceId ? document.getElementById(activeModalSourceId) : null;
+    }}
+    function getTextareaHeading(textarea) {{
+      const label = textarea.id ? document.querySelector(`label[for="${{textarea.id}}"]`) : null;
+      return (label?.textContent || textarea.placeholder || "Expanded Editor").trim();
+    }}
+    function openTextareaModal(textarea) {{
+      const modal = document.getElementById("textarea-modal");
+      const modalInput = document.getElementById("textarea-modal-input");
+      const modalTitle = document.getElementById("textarea-modal-title");
+      activeModalSourceId = textarea.id || "";
+      modalTitle.textContent = getTextareaHeading(textarea);
+      modalInput.value = textarea.value || "";
+      modal.classList.add("open");
+      modal.setAttribute("aria-hidden", "false");
+      modalInput.focus();
+      modalInput.selectionStart = modalInput.value.length;
+    }}
+    function closeTextareaModal() {{
+      const modal = document.getElementById("textarea-modal");
+      modal.classList.remove("open");
+      modal.setAttribute("aria-hidden", "true");
+      activeModalSourceId = "";
+    }}
+    function syncModalToSource() {{
+      const source = modalSource();
+      const modalInput = document.getElementById("textarea-modal-input");
+      if (!source || !modalInput) return;
+      source.value = modalInput.value;
+      if (source.id) {{
+        dirtyFields.add(source.id);
+      }}
+    }}
+    function ensureTextareaExpandButtons(root = document) {{
+      root.querySelectorAll("textarea").forEach((textarea) => {{
+        if (textarea.id === "textarea-modal-input" || textarea.dataset.expandBound === "true") return;
+        textarea.dataset.expandBound = "true";
+        const toolbar = document.createElement("div");
+        toolbar.className = "textarea-toolbar";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "secondary expand-textarea-button";
+        button.innerHTML = "&#8599; Expand";
+        button.addEventListener("click", () => openTextareaModal(textarea));
+        toolbar.appendChild(button);
+        textarea.insertAdjacentElement("afterend", toolbar);
+      }});
+    }}
     function syncModels(models, selectedOutline, selectedWriter) {{
       const outlineSelect = document.getElementById("outline_model");
       const writerSelect = document.getElementById("writer_model");
@@ -684,33 +798,34 @@ def _render_page() -> bytes:
       container.innerHTML = html;
       lastRenderedChapterDetailSignature = signature;
       bindEditableFields(container);
+      ensureTextareaExpandButtons(container);
     }}
     function buildExternalConfigFromState(state) {{
       const liveChapterDetails = collectChapterDetailsFields();
       return {{
         name: document.getElementById("config_name").value.trim() || "external-config",
         created_at: new Date().toISOString(),
-        endpoint_url: state.endpoint_url || document.getElementById("endpoint_url").value,
-        outline_model: state.outline_model || document.getElementById("outline_model").value,
-        writer_model: state.writer_model || document.getElementById("writer_model").value,
-        temperature: Number(state.temperature ?? document.getElementById("temperature").value ?? 0.1),
-        num_chapters: Number(state.num_chapters ?? document.getElementById("num_chapters").value ?? 10),
-        token_limit_enabled: Boolean(state.token_limit_enabled),
-        max_tokens: Number(state.max_tokens ?? document.getElementById("max_tokens").value ?? 4096),
-        reduce_thinking: Boolean(state.reduce_thinking),
-        max_iterations: Number(state.max_iterations ?? document.getElementById("max_iterations").value ?? 5),
-        chapter_target_word_count: Number(state.chapter_target_word_count ?? document.getElementById("chapter_target_word_count").value ?? 0),
+        endpoint_url: document.getElementById("endpoint_url").value || state.endpoint_url || "",
+        outline_model: document.getElementById("outline_model").value || state.outline_model || "",
+        writer_model: document.getElementById("writer_model").value || state.writer_model || "",
+        temperature: Number(document.getElementById("temperature").value ?? state.temperature ?? 0.1),
+        num_chapters: Number(document.getElementById("num_chapters").value ?? state.num_chapters ?? 10),
+        token_limit_enabled: document.getElementById("token_limit_enabled").value === "on",
+        max_tokens: Number(document.getElementById("max_tokens").value ?? state.max_tokens ?? 4096),
+        reduce_thinking: document.getElementById("reduce_thinking").value === "on",
+        max_iterations: Number(document.getElementById("max_iterations").value ?? state.max_iterations ?? 5),
+        chapter_target_word_count: Number(document.getElementById("chapter_target_word_count").value ?? state.chapter_target_word_count ?? 0),
         output_folder: state.output_folder || "",
         chapter_details: Object.keys(liveChapterDetails).length ? liveChapterDetails : (state.chapter_details || {{}}),
         prompt_sections: {{
-          premise: state.prompt_sections?.premise ?? document.getElementById("premise").value,
-          storylines: state.prompt_sections?.storylines ?? document.getElementById("storylines").value,
-          setting: state.prompt_sections?.setting ?? document.getElementById("setting").value,
-          characters: state.prompt_sections?.characters ?? document.getElementById("characters").value,
-          writing_style: state.prompt_sections?.writing_style ?? document.getElementById("writing_style").value,
-          tone: state.prompt_sections?.tone ?? document.getElementById("tone").value,
-          plot_beats: state.prompt_sections?.plot_beats ?? document.getElementById("plot_beats").value,
-          constraints: state.prompt_sections?.constraints ?? document.getElementById("constraints").value,
+          premise: document.getElementById("premise").value,
+          storylines: document.getElementById("storylines").value,
+          setting: document.getElementById("setting").value,
+          characters: document.getElementById("characters").value,
+          writing_style: document.getElementById("writing_style").value,
+          tone: document.getElementById("tone").value,
+          plot_beats: document.getElementById("plot_beats").value,
+          constraints: document.getElementById("constraints").value,
         }},
       }};
     }}
@@ -719,6 +834,7 @@ def _render_page() -> bytes:
       document.getElementById("phase-status").innerHTML = `<span id="live-spinner" class="spinner-shell ${{state.busy ? "active" : ""}}"><span class="spinner-dot"></span></span> Mode: ${{escapeHtml(state.mode_label)}} | Status: ${{escapeHtml(state.status)}} | Phase: ${{escapeHtml(state.phase)}}`;
       document.getElementById("current-chapter-display").textContent = `${{state.current_chapter}} / ${{state.total_chapters}}`;
       setFieldValue("endpoint_url", state.endpoint_url || "");
+      setFieldValue("config_name", state.config_name || "");
       if (forceNextFormSync || (!isFieldLocked("outline_model") && !isFieldLocked("writer_model"))) {{
         syncModels(state.available_models || [], state.outline_model || "", state.writer_model || "");
         dirtyFields.delete("outline_model");
@@ -780,9 +896,22 @@ def _render_page() -> bytes:
       if (state.phase_version !== lastPhaseVersion) {{
         lastPhaseVersion = state.phase_version;
         flashPhase();
-        if ((state.current_checkpoint_title || "").toLowerCase().includes("complete") || state.phase === "Generation complete" || /^Chapter \d+ complete$/i.test(state.current_checkpoint_title || "")) {{
+        const checkpointTitle = state.current_checkpoint_title || "";
+        const isCompletionCheckpoint =
+          /^Chapter \d+ complete$/i.test(checkpointTitle) ||
+          /^Chapter \d+ regenerated$/i.test(checkpointTitle) ||
+          /^Outline ready for review$/i.test(checkpointTitle) ||
+          state.phase === "Generation complete";
+        const completionSignal =
+          state.phase === "Generation complete"
+            ? `phase:${{state.phase}}`
+            : (checkpointTitle ? `checkpoint:${{checkpointTitle}}` : "");
+        if (isCompletionCheckpoint && completionSignal && completionSignal !== lastCompletionSignal) {{
           playWaitingCue();
           playCompleteCue();
+        }}
+        if (isCompletionCheckpoint && completionSignal) {{
+          lastCompletionSignal = completionSignal;
         }}
       }}
       forceNextFormSync = false;
@@ -790,6 +919,7 @@ def _render_page() -> bytes:
     function bindEditableFields(root = document) {{
       root.querySelectorAll("input, textarea, select").forEach((field) => {{
         if (field.dataset.dirtyBound === "true") return;
+        if (field.id === "textarea-modal-input") return;
         field.dataset.dirtyBound = "true";
         field.addEventListener("input", () => {{
           if (field.id) dirtyFields.add(field.id);
@@ -810,6 +940,16 @@ def _render_page() -> bytes:
           event.preventDefault();
           const action = form.dataset.submitAction || form.getAttribute("action") || window.location.pathname;
           const formData = new FormData(form);
+          if (action === "/save-config") {{
+            const setupForm = document.getElementById("run-setup-form");
+            if (setupForm) {{
+              new FormData(setupForm).forEach((value, key) => {{
+                if (!formData.has(key)) {{
+                  formData.append(key, value);
+                }}
+              }});
+            }}
+          }}
           try {{
             await fetch(action, {{
               method: "POST",
@@ -883,7 +1023,20 @@ def _render_page() -> bytes:
       link.remove();
       URL.revokeObjectURL(url);
     }});
+    document.getElementById("textarea-modal-close").addEventListener("click", closeTextareaModal);
+    document.getElementById("textarea-modal").addEventListener("click", (event) => {{
+      if (event.target.id === "textarea-modal") {{
+        closeTextareaModal();
+      }}
+    }});
+    document.getElementById("textarea-modal-input").addEventListener("input", syncModalToSource);
+    document.addEventListener("keydown", (event) => {{
+      if (event.key === "Escape" && document.getElementById("textarea-modal").classList.contains("open")) {{
+        closeTextareaModal();
+      }}
+    }});
     bindEditableFields();
+    ensureTextareaExpandButtons();
     bindAsyncForms();
     bindChapterToggles();
     const source = new EventSource("/events");
@@ -954,7 +1107,36 @@ class BookUIHandler(BaseHTTPRequestHandler):
         elif self.path == "/refresh-models":
             controller.refresh_models(_first(form, "endpoint_url", ""))
         elif self.path == "/save-config":
-            controller.save_config(_first(form, "config_name", ""))
+            if "premise" in form or "num_chapters" in form:
+                num_chapters = int(_first(form, "num_chapters", "10") or "10")
+                chapter_details = _extract_chapter_details(form, num_chapters)
+                sections = PromptSections(
+                    premise=_first(form, "premise", DEFAULT_SECTIONS.premise),
+                    storylines=_first(form, "storylines", DEFAULT_SECTIONS.storylines),
+                    setting=_first(form, "setting", DEFAULT_SECTIONS.setting),
+                    characters=_first(form, "characters", DEFAULT_SECTIONS.characters),
+                    writing_style=_first(form, "writing_style", DEFAULT_SECTIONS.writing_style),
+                    tone=_first(form, "tone", DEFAULT_SECTIONS.tone),
+                    plot_beats=_first(form, "plot_beats", DEFAULT_SECTIONS.plot_beats),
+                    constraints=_first(form, "constraints", DEFAULT_SECTIONS.constraints),
+                )
+                controller.save_config_data(
+                    _first(form, "config_name", ""),
+                    sections,
+                    chapter_details,
+                    num_chapters,
+                    _first(form, "endpoint_url", ""),
+                    _first(form, "outline_model", ""),
+                    _first(form, "writer_model", ""),
+                    float(_first(form, "temperature", "0.1") or "0.1"),
+                    _first(form, "token_limit_enabled", "on") == "on",
+                    int(_first(form, "max_tokens", "4096") or "4096"),
+                    _first(form, "reduce_thinking", "off") == "on",
+                    int(_first(form, "max_iterations", "5") or "5"),
+                    int(_first(form, "chapter_target_word_count", "0") or "0"),
+                )
+            else:
+                controller.save_config(_first(form, "config_name", ""))
         elif self.path == "/load-config":
             controller.load_config(_first(form, "config_file", ""))
         elif self.path == "/load-external-config":
@@ -962,7 +1144,7 @@ class BookUIHandler(BaseHTTPRequestHandler):
                 payload = _load_external_config_payload(body)
             except json.JSONDecodeError as exc:
                 message = f"Invalid external config JSON near line {exc.lineno}, column {exc.colno}: {exc.msg}"
-                print(f"[web_ui] {message}")
+                controller._log_runtime(f"[web_ui] {message}")
                 controller.report_error(message)
                 if is_async:
                     encoded = json.dumps({"error": message}).encode("utf-8")
@@ -1079,6 +1261,7 @@ def _snapshot_payload(snapshot):
             "max_iterations": snapshot.max_iterations,
             "chapter_target_word_count": snapshot.chapter_target_word_count,
             "output_folder": snapshot.output_folder,
+            "config_name": snapshot.config_name,
             "chapter_details": {str(key): value for key, value in snapshot.chapter_details.items()},
             "prompt_sections": snapshot.prompt_sections.__dict__,
             "progress": snapshot.progress.__dict__,
@@ -1199,12 +1382,12 @@ def _render_artifacts(review) -> str:
 
 def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
     server = ThreadingHTTPServer((host, port), BookUIHandler)
-    print(f"Book Writer UI running at http://{host}:{port}")
-    print("Open the URL in your browser and control generation from there.")
+    controller._log_runtime(f"Book Writer UI running at http://{host}:{port}")
+    controller._log_runtime("Open the URL in your browser and control generation from there.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down UI server...")
+        controller._log_runtime("\nShutting down UI server...")
     finally:
         server.server_close()
 
