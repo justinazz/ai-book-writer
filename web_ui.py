@@ -60,15 +60,22 @@ def _load_external_config_payload(body: str) -> Dict:
 
 def _render_page() -> bytes:
     snapshot = controller.get_snapshot()
-    if snapshot.status == "stopped":
+    if snapshot.resume_available and not snapshot.run_active:
+        mode_label = f"Ready to resume from Chapter {snapshot.resume_chapter_number}"
+    elif snapshot.status == "stopped":
         mode_label = "Paused"
     elif snapshot.stop_requested and snapshot.run_active:
-        mode_label = "Pausing at the next checkpoint"
+        mode_label = "Pausing after the current chapter step"
     else:
         mode_label = "Keep Going" if snapshot.mode == "keep_going" else "Ask for Advice"
     waiting = "Yes" if snapshot.waiting_for_input else "No"
     can_start = not snapshot.run_active
     can_control = snapshot.run_active
+    can_queue_chapter_advice = snapshot.run_active or snapshot.resume_available
+    can_continue = (
+        (snapshot.run_active and snapshot.waiting_for_input and not snapshot.awaiting_outline_approval)
+        or (snapshot.resume_available and not snapshot.awaiting_outline_approval)
+    )
 
     checkpoint_body = snapshot.current_checkpoint_body or "Nothing to review yet."
     outline_text = snapshot.outline_text or "Outline not generated yet."
@@ -379,7 +386,7 @@ def _render_page() -> bytes:
             <button id="ask-advice-button" class="secondary" {"disabled" if not can_control else ""}>&#128172; Ask for Advice</button>
           </form>
           <form method="post" action="/continue" class="async-form">
-            <button id="continue-button" {"disabled" if not can_control else ""}>&#9658; Continue</button>
+            <button id="continue-button" {"disabled" if not can_continue else ""}>&#9658; Continue</button>
           </form>
           <form method="post" action="/stop" class="async-form">
             <button id="stop-button" class="danger" {"disabled" if not can_control else ""}>&#9208; Pause</button>
@@ -402,8 +409,6 @@ def _render_page() -> bytes:
 
           <label class="label" for="writer_model">Writer Model</label>
           <select id="writer_model" name="writer_model">{_render_options(models, snapshot.writer_model)}</select>
-          <label class="label" for="temperature">Temperature: <span id="temperature-value">{snapshot.temperature:.1f}</span></label>
-          <input id="temperature" type="range" min="0" max="2" step="0.1" name="temperature" value="{snapshot.temperature:.1f}">
 
           <label class="label" for="premise">Premise</label>
           <textarea id="premise" name="premise">{escape(sections.premise)}</textarea>
@@ -486,12 +491,16 @@ def _render_page() -> bytes:
           </div>
         </form>
 
-        <h2 style="margin-top: 18px;">Advice</h2>
-        <form method="post" action="/advice" class="async-form">
-          <label class="label" for="advice">Guidance for the next checkpoint</label>
-          <textarea class="advice-box" id="advice" name="advice" placeholder="Example: make Gary more sympathetic, slow down the pacing, and foreshadow the market crash more clearly."></textarea>
+        <h2 style="margin-top: 18px;">Chapter Advice</h2>
+        <form method="post" action="/chapter-advice" class="async-form">
+          <label class="label" for="chapter_advice_number">Chapter Number</label>
+          <input id="chapter_advice_number" type="number" min="1" max="{snapshot.total_chapters or snapshot.num_chapters or 1}" name="chapter_number" value="{snapshot.current_chapter or 1}">
+          <label class="label" for="advice">Replacement beats for the next attempt of that chapter</label>
+          <textarea class="advice-box" id="advice" name="advice" placeholder="Example: 1. He stalls at the threshold. 2. She notices the blood on his cuff. 3. Their argument expands into the hidden ledger reveal."></textarea>
+          <label class="label" for="chapter_advice_target_word_count">Optional replacement target word count</label>
+          <input id="chapter_advice_target_word_count" type="number" min="0" max="50000" name="target_word_count" value="">
           <div class="controls">
-            <button {"disabled" if not can_control else ""}>&#10148; Queue Advice</button>
+            <button id="chapter-advice-button" {"disabled" if not can_queue_chapter_advice else ""}>&#10148; Queue Chapter Advice</button>
           </div>
         </form>
         <form method="post" action="/regenerate-chapter" class="async-form">
@@ -541,7 +550,7 @@ def _render_page() -> bytes:
           <pre id="outline-text">{escape(outline_text)}</pre>
         </div>
 
-        <h2>Last Advice</h2>
+        <h2>Last Chapter Advice</h2>
         <div class="card">
           <pre id="last-advice">{escape(snapshot.latest_advice or "No advice submitted yet.")}</pre>
         </div>
@@ -808,7 +817,6 @@ def _render_page() -> bytes:
         endpoint_url: document.getElementById("endpoint_url").value || state.endpoint_url || "",
         outline_model: document.getElementById("outline_model").value || state.outline_model || "",
         writer_model: document.getElementById("writer_model").value || state.writer_model || "",
-        temperature: Number(document.getElementById("temperature").value ?? state.temperature ?? 0.1),
         num_chapters: Number(document.getElementById("num_chapters").value ?? state.num_chapters ?? 10),
         token_limit_enabled: document.getElementById("token_limit_enabled").value === "on",
         max_tokens: Number(document.getElementById("max_tokens").value ?? state.max_tokens ?? 4096),
@@ -851,6 +859,10 @@ def _render_page() -> bytes:
       setFieldValue("chapter_target_word_count", state.chapter_target_word_count ?? 0);
       setFieldValue("num_chapters", state.num_chapters ?? 10);
       renderChapterDetailEditors(state.num_chapters ?? 10, state.chapter_details || {{}});
+      const chapterAdviceNumber = document.getElementById("chapter_advice_number");
+      if (chapterAdviceNumber && document.activeElement !== chapterAdviceNumber) {{
+        chapterAdviceNumber.value = state.current_chapter || chapterAdviceNumber.value || 1;
+      }}
       document.getElementById("checkpoint-title").textContent = state.current_checkpoint_title || "Waiting for the first checkpoint.";
       document.getElementById("checkpoint-body").textContent = state.current_checkpoint_body || "Nothing to review yet.";
       document.getElementById("outline-text").textContent = state.outline_text || "Outline not generated yet.";
@@ -860,8 +872,6 @@ def _render_page() -> bytes:
       document.getElementById("recent-events").textContent = state.recent_events || "No events yet.";
       document.getElementById("outline-approval-status").textContent = `Approved: ${{state.outline_approved ? "Yes" : "No"}} | Awaiting approval: ${{state.awaiting_outline_approval ? "Yes" : "No"}}`;
       setFieldValue("outline_feedback", state.outline_feedback || "");
-      setFieldValue("temperature", state.temperature ?? 0.1);
-      document.getElementById("temperature-value").textContent = Number(state.temperature ?? 0.1).toFixed(1);
       setSelectValue("token_limit_enabled", state.token_limit_enabled ? "on" : "off");
       setFieldValue("max_tokens", state.max_tokens ?? 4096);
       setFieldValue("max_iterations", state.max_iterations ?? 5);
@@ -880,10 +890,11 @@ def _render_page() -> bytes:
       document.getElementById("start-button").disabled = state.run_active;
       document.getElementById("keep-going-button").disabled = !state.run_active || state.mode === "keep_going";
       document.getElementById("ask-advice-button").disabled = !state.run_active || state.mode === "ask_for_advice";
-      document.getElementById("continue-button").disabled = !state.run_active || !state.waiting_for_input || state.awaiting_outline_approval;
+      document.getElementById("continue-button").disabled = ((!state.run_active || !state.waiting_for_input) && !state.resume_available) || state.awaiting_outline_approval;
       document.getElementById("stop-button").disabled = !state.run_active || state.status === "completed" || state.status === "failed";
       document.getElementById("approve-outline-button").disabled = !state.awaiting_outline_approval;
       document.getElementById("regen-outline-button").disabled = !state.awaiting_outline_approval;
+      document.getElementById("chapter-advice-button").disabled = !state.run_active && !state.resume_available;
       document.getElementById("regen-chapter-button").disabled = state.run_active || !state.outline_approved;
       if (state.busy && state.progress.current_agent && state.progress.current_agent !== "idle" && state.progress.current_agent !== lastAgent) {{
         playSoftCue();
@@ -983,9 +994,6 @@ def _render_page() -> bytes:
     }});
     document.getElementById("num_chapters").addEventListener("input", (event) => {{
       renderChapterDetailEditors(event.target.value, collectChapterDetailsFields());
-    }});
-    document.getElementById("temperature").addEventListener("input", (event) => {{
-      document.getElementById("temperature-value").textContent = Number(event.target.value).toFixed(1);
     }});
     document.getElementById("external-config-button").addEventListener("click", () => {{
       document.getElementById("external-config-input").click();
@@ -1097,7 +1105,6 @@ class BookUIHandler(BaseHTTPRequestHandler):
                 _first(form, "outline_model", ""),
                 _first(form, "writer_model", ""),
                 _first(form, "endpoint_url", ""),
-                float(_first(form, "temperature", "0.1") or "0.1"),
                 _first(form, "token_limit_enabled", "on") == "on",
                 int(_first(form, "max_tokens", "4096") or "4096"),
                 _first(form, "reduce_thinking", "off") == "on",
@@ -1128,7 +1135,6 @@ class BookUIHandler(BaseHTTPRequestHandler):
                     _first(form, "endpoint_url", ""),
                     _first(form, "outline_model", ""),
                     _first(form, "writer_model", ""),
-                    float(_first(form, "temperature", "0.1") or "0.1"),
                     _first(form, "token_limit_enabled", "on") == "on",
                     int(_first(form, "max_tokens", "4096") or "4096"),
                     _first(form, "reduce_thinking", "off") == "on",
@@ -1168,8 +1174,23 @@ class BookUIHandler(BaseHTTPRequestHandler):
             controller.set_mode(_first(form, "mode", "keep_going"))
         elif self.path == "/continue":
             controller.continue_run()
-        elif self.path == "/advice":
-            controller.submit_advice(_first(form, "advice", ""))
+        elif self.path in {"/advice", "/chapter-advice"}:
+            snapshot = controller.get_snapshot()
+            chapter_number_raw = _first(form, "chapter_number", str(snapshot.current_chapter or 1))
+            try:
+                chapter_number = int(chapter_number_raw or str(snapshot.current_chapter or 1))
+            except ValueError:
+                chapter_number = snapshot.current_chapter or 1
+            target_word_count_raw = _first(form, "target_word_count", "").strip()
+            try:
+                target_word_count = int(target_word_count_raw) if target_word_count_raw else None
+            except ValueError:
+                target_word_count = None
+            controller.submit_chapter_advice(
+                chapter_number,
+                _first(form, "advice", ""),
+                target_word_count,
+            )
         elif self.path == "/regenerate-chapter":
             controller.regenerate_chapter(int(_first(form, "chapter_number", "1") or "1"))
         elif self.path == "/stop":
@@ -1221,10 +1242,12 @@ class BookUIHandler(BaseHTTPRequestHandler):
 
 
 def _snapshot_payload(snapshot):
-    if snapshot.status == "stopped":
+    if snapshot.resume_available and not snapshot.run_active:
+        mode_label = f"Ready to resume from Chapter {snapshot.resume_chapter_number}"
+    elif snapshot.status == "stopped":
         mode_label = "Paused"
     elif snapshot.stop_requested and snapshot.run_active:
-        mode_label = "Pausing at the next checkpoint"
+        mode_label = "Pausing after the current chapter step"
     else:
         mode_label = "Keep Going" if snapshot.mode == "keep_going" else "Ask for Advice"
     return {
@@ -1236,6 +1259,8 @@ def _snapshot_payload(snapshot):
             "busy": snapshot.busy,
             "stop_requested": snapshot.stop_requested,
             "waiting_for_input": snapshot.waiting_for_input,
+            "resume_available": snapshot.resume_available,
+            "resume_chapter_number": snapshot.resume_chapter_number,
             "current_chapter": snapshot.current_chapter,
             "total_chapters": snapshot.total_chapters,
             "num_chapters": snapshot.num_chapters,
@@ -1243,7 +1268,6 @@ def _snapshot_payload(snapshot):
             "outline_model": snapshot.outline_model,
             "writer_model": snapshot.writer_model,
             "available_models": snapshot.available_models,
-            "temperature": snapshot.temperature,
             "phase_version": snapshot.phase_version,
             "current_checkpoint_title": snapshot.current_checkpoint_title,
             "current_checkpoint_body": snapshot.current_checkpoint_body,

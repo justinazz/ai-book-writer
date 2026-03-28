@@ -5,9 +5,15 @@ import autogen
 from config import OUTPUT_FOLDER
 
 class BookAgents:
-    def __init__(self, agent_config: Dict, outline: Optional[List[Dict]] = None):
+    def __init__(
+        self,
+        agent_config: Dict,
+        outline: Optional[List[Dict]] = None,
+        writer_agent_config: Optional[Dict] = None,
+    ):
         """Initialize agents with book outline context"""
         self.agent_config = agent_config
+        self.writer_agent_config = writer_agent_config or agent_config
         self.outline = outline
         self.world_elements = {}  # Track described locations/elements
         self.character_developments = {}  # Track character arcs
@@ -186,7 +192,7 @@ class BookAgents:
             
             Use the outline and previous content for continuity, but never let them override the current chapter beat anchors in the active prompt.
             Mark drafts with 'SCENE:' and final versions with 'SCENE FINAL:'""",
-            llm_config=self.agent_config,
+            llm_config=self.writer_agent_config,
         )
 
         # Editor: Reviews and improves content
@@ -213,16 +219,17 @@ class BookAgents:
             16. Do not fail sentence length based on a fragment below the allowed limit or on vague style concerns; only fail it when an actual sentence exceeds the limit
             
             Format your responses:
-            1. Start critiques with 'FEEDBACK:'
-            2. Provide suggestions with 'SUGGEST:'
-            3. Only return 'EDITED_SCENE:' when the prompt explicitly asks for a rewritten scene
-            4. If 'Required Chapter Details' are provided, include a 'BEAT CHECK:' section that lists each beat in order, one line per beat, and marks it PASS or FAIL with a short evidence note
-            5. End the beat check with 'BEAT CHECK RESULT: PASS' only if all beats are present in order by narrative intent; otherwise use 'BEAT CHECK RESULT: FAIL'
-            6. If repetition or looping is detected, include 'LOOP CHECK RESULT: FAIL'; otherwise include 'LOOP CHECK RESULT: PASS'
-            7. Include a 'SENTENCE LENGTH CHECK:' section whenever you review a draft and end it with 'SENTENCE LENGTH CHECK RESULT: PASS' or 'SENTENCE LENGTH CHECK RESULT: FAIL'
-            8. Include a dedicated 'WORD COUNT ADVICE:' section whenever a target word count is provided, identifying exactly where to add or cut material if needed
-            9. If the draft is already inside the allowed word-count range, state that no word-count changes are required and do not suggest trimming or padding merely to hit the exact target
-            10. Keep sentence-fragment word counts inside the sentence-length section only; do not present a fragment count as the draft or chapter word count
+            1. If the prompt asks for structured JSON feedback, return only valid JSON with the exact keys requested
+            2. Otherwise start critiques with 'FEEDBACK:'
+            3. Provide suggestions with 'SUGGEST:'
+            4. Only return 'EDITED_SCENE:' when the prompt explicitly asks for a rewritten scene
+            5. If 'Required Chapter Details' are provided, include a beat-by-beat verdict in the requested structure and preserve item order
+            6. End every requested result field with exactly PASS or FAIL and no extra wording inside that result value
+            7. Include repetition/looping verdicts whenever the prompt requests them
+            8. Include sentence-length verdicts whenever the prompt requests them
+            9. Include dedicated word-count guidance whenever a target word count is provided
+            10. If the draft is already inside the allowed word-count range, state that no word-count changes are required and do not suggest trimming or padding merely to hit the exact target
+            11. Keep sentence-fragment word counts inside the sentence-length section only; do not present a fragment count as the draft or chapter word count
 
             Base your review on the current chapter requirements and continuity notes provided in the active prompt.
             Do not rely on hidden assumptions about later chapters or missing full-book context.

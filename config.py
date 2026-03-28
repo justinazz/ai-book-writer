@@ -15,7 +15,6 @@ MAX_ITERATIONS_LIMIT = 100
 def get_config(
     local_url: str = DEFAULT_BASE_URL,
     model: str = DEFAULT_MODEL,
-    temperature: float = 0.1,
     max_tokens: int | None = None,
     reasoning_effort: str | None = None,
     extra_body: dict | None = None,
@@ -34,7 +33,6 @@ def get_config(
         config_list[0]["extra_body"] = extra_body
 
     config = {
-        "temperature": temperature,
         "config_list": config_list,
         "timeout": 600,
         "cache_seed": None,

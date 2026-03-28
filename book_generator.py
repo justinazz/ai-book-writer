@@ -1,4 +1,5 @@
 import os
+import json
 import re
 import threading
 import time
@@ -40,6 +41,9 @@ META_PROSE_PATTERNS = (
     r"(?im)^\s*the chapter concludes with\b.*$",
 )
 
+class GenerationPauseRequested(RuntimeError):
+    """Raised when the controller requests a safe pause during chapter generation."""
+
 class BookGenerator:
     def __init__(
         self,
@@ -50,16 +54,27 @@ class BookGenerator:
         max_iterations: int = 5,
         progress_callback: Optional[Callable[[Dict], None]] = None,
         diagnostic_logger: Optional[Callable[[str], None]] = None,
+        chapter_prompt_provider: Optional[Callable[[int, int, str, str], Dict]] = None,
+        validation_callback: Optional[Callable[[Dict], None]] = None,
+        should_stop_callback: Optional[Callable[[], bool]] = None,
+        initial_chapter_memory: Optional[Dict[int, str]] = None,
     ):
         """Initialize with outline to maintain chapter count context"""
         self.agents = agents
         self.agent_config = agent_config
         self.output_dir = output_dir or OUTPUT_FOLDER
-        self.chapters_memory = []  # Store chapter summaries
+        self.chapter_memory: Dict[int, str] = {
+            int(chapter_number): str(entry).strip()
+            for chapter_number, entry in (initial_chapter_memory or {}).items()
+            if str(entry).strip()
+        }
         self.max_iterations = max(1, max_iterations)
         self.outline = outline  # Store the outline
         self.progress_callback = progress_callback
         self.diagnostic_logger = diagnostic_logger
+        self.chapter_prompt_provider = chapter_prompt_provider
+        self.validation_callback = validation_callback
+        self.should_stop_callback = should_stop_callback
         os.makedirs(self.output_dir, exist_ok=True)
 
     def _log(self, message: str) -> None:
@@ -90,6 +105,83 @@ class BookGenerator:
             "iteration": iteration,
             "max_iterations": self.max_iterations,
         })
+
+    def _resolve_chapter_prompt_for_attempt(
+        self,
+        chapter_number: int,
+        attempt: int,
+        phase: str,
+        fallback_prompt: str,
+    ) -> Dict[str, object]:
+        if not self.chapter_prompt_provider:
+            return {
+                "prompt": fallback_prompt,
+                "version": 0,
+                "details": {},
+                "attempt": attempt,
+                "phase": phase,
+            }
+        try:
+            payload = self.chapter_prompt_provider(chapter_number, attempt, phase, fallback_prompt) or {}
+        except Exception as exc:
+            self._log(f"Chapter prompt provider failed for Chapter {chapter_number}, attempt {attempt}: {exc}")
+            return {
+                "prompt": fallback_prompt,
+                "version": 0,
+                "details": {},
+                "attempt": attempt,
+                "phase": phase,
+            }
+        prompt = str(payload.get("prompt") or fallback_prompt or "").strip()
+        try:
+            version = int(payload.get("version", 0) or 0)
+        except (TypeError, ValueError):
+            version = 0
+        details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+        return {
+            "prompt": prompt or fallback_prompt,
+            "version": version,
+            "details": details,
+            "attempt": attempt,
+            "phase": phase,
+        }
+
+    def _summarize_chapter_details(self, details: Dict[str, object]) -> str:
+        if not isinstance(details, dict):
+            return ""
+        beats = str(details.get("beats", "")).strip()
+        try:
+            target_word_count = int(details.get("target_word_count", 0) or 0)
+        except (TypeError, ValueError):
+            target_word_count = 0
+        lines: List[str] = []
+        if target_word_count > 0:
+            lines.append(f"Target Word Count: {target_word_count}")
+        if beats:
+            lines.append("Beats:")
+            lines.append(beats)
+        return "\n".join(lines).strip()
+
+    def _raise_if_pause_requested(
+        self,
+        chapter_number: int,
+        chapter_title: str,
+        attempt: int,
+        detail: str,
+        output_stage: str = "",
+    ) -> None:
+        if not self.should_stop_callback or not self.should_stop_callback():
+            return
+        self._emit_progress(
+            chapter_number,
+            chapter_title,
+            "system",
+            "pause_requested",
+            detail,
+            output_stage,
+            attempt,
+        )
+        raise GenerationPauseRequested(f"Pause requested during Chapter {chapter_number}")
 
     def _log_console_message(self, chapter_number: int, sender: str, content: str) -> None:
         self._log_block(f"CHAPTER {chapter_number} | OUTPUT | {sender}", content)
@@ -216,9 +308,9 @@ class BookGenerator:
 
     def _store_chapter_memory(self, chapter_number: int, chapter_content: str, memory_update: str) -> None:
         if memory_update:
-            self.chapters_memory.append(f"Chapter {chapter_number} Memory:\n{memory_update.strip()}")
+            self.chapter_memory[chapter_number] = f"Chapter {chapter_number} Memory:\n{memory_update.strip()}"
             return
-        self.chapters_memory.append(self._build_basic_chapter_summary(chapter_number, chapter_content))
+        self.chapter_memory[chapter_number] = self._build_basic_chapter_summary(chapter_number, chapter_content)
 
     def _contains_any_tag_marker(self, content: str, tags: List[str]) -> bool:
         upper_content = (content or "").upper()
@@ -379,6 +471,209 @@ class BookGenerator:
             parts.append(tail)
         return "\n\n".join(part for part in parts if part).strip()
 
+    def _normalize_editor_status(self, value: object) -> str:
+        normalized = str(value or "").strip().upper()
+        return normalized if normalized in {"PASS", "FAIL"} else ""
+
+    def _structured_value_to_lines(self, value: object, prefix: str = "") -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            lines = [line.strip() for line in value.splitlines() if line.strip()]
+            if not lines and value.strip():
+                lines = [value.strip()]
+            if prefix:
+                return [line if line.startswith(prefix) else f"{prefix}{line}" for line in lines]
+            return lines
+        if isinstance(value, list):
+            lines: List[str] = []
+            for item in value:
+                if isinstance(item, dict):
+                    parts = [
+                        f"{key}: {str(val).strip()}"
+                        for key, val in item.items()
+                        if str(val).strip()
+                    ]
+                    if parts:
+                        lines.append((prefix if prefix else "- ") + "; ".join(parts))
+                else:
+                    lines.extend(self._structured_value_to_lines(item, prefix or "- "))
+            return lines
+        if isinstance(value, dict):
+            lines = []
+            for key, val in value.items():
+                text = str(val).strip()
+                if text:
+                    lines.append((prefix if prefix else "- ") + f"{key}: {text}")
+            return lines
+        text = str(value).strip()
+        if not text:
+            return []
+        return [text if not prefix else f"{prefix}{text}"]
+
+    def _build_editor_feedback_from_payload(self, payload: Dict) -> str:
+        feedback = payload.get("feedback")
+        if isinstance(feedback, dict):
+            payload = feedback
+
+        beat_items_value = payload.get("beat_check", payload.get("beat_checks", []))
+        if isinstance(beat_items_value, dict):
+            beat_items_value = beat_items_value.get("items", [])
+        beat_lines: List[str] = []
+        if isinstance(beat_items_value, list):
+            for index, item in enumerate(beat_items_value, start=1):
+                if isinstance(item, dict):
+                    item_index = item.get("index", index)
+                    beat = str(
+                        item.get("beat")
+                        or item.get("item")
+                        or item.get("requirement")
+                        or f"Checklist item {item_index}"
+                    ).strip()
+                    status = self._normalize_editor_status(item.get("status") or item.get("result"))
+                    evidence = str(
+                        item.get("evidence")
+                        or item.get("note")
+                        or item.get("notes")
+                        or item.get("details")
+                        or item.get("reason")
+                        or ""
+                    ).strip()
+                    line = f"{item_index}. {beat}"
+                    if status:
+                        line += f" - {status}"
+                    if evidence:
+                        line += f" ({evidence})"
+                    beat_lines.append(line)
+                else:
+                    text = str(item).strip()
+                    if text:
+                        beat_lines.append(text)
+        elif isinstance(beat_items_value, str):
+            beat_lines = [line.strip() for line in beat_items_value.splitlines() if line.strip()]
+
+        beat_result = self._normalize_editor_status(
+            payload.get("beat_check_result") or payload.get("beat_result")
+        )
+        if not beat_result and beat_lines:
+            upper_lines = [line.upper() for line in beat_lines]
+            if any("FAIL" in line for line in upper_lines):
+                beat_result = "FAIL"
+            elif all("PASS" in line for line in upper_lines):
+                beat_result = "PASS"
+
+        loop_block = payload.get("loop_check")
+        loop_result = self._normalize_editor_status(payload.get("loop_check_result") or payload.get("loop_result"))
+        loop_lines = self._structured_value_to_lines(payload.get("loop_check_notes"))
+        if isinstance(loop_block, dict):
+            loop_result = loop_result or self._normalize_editor_status(loop_block.get("status"))
+            loop_lines = loop_lines or self._structured_value_to_lines(
+                loop_block.get("notes") or loop_block.get("evidence") or loop_block.get("details")
+            )
+        elif loop_block and not loop_lines:
+            loop_lines = self._structured_value_to_lines(loop_block)
+
+        sentence_block = payload.get("sentence_length_check", payload.get("sentence_check"))
+        sentence_result = self._normalize_editor_status(
+            payload.get("sentence_length_check_result")
+            or payload.get("sentence_check_result")
+        )
+        sentence_lines = self._structured_value_to_lines(sentence_block)
+        if isinstance(sentence_block, dict):
+            sentence_result = sentence_result or self._normalize_editor_status(sentence_block.get("status"))
+            sentence_lines = sentence_lines or self._structured_value_to_lines(
+                sentence_block.get("notes") or sentence_block.get("findings") or sentence_block.get("details")
+            )
+
+        word_count_advice = payload.get("word_count_advice", payload.get("word_count"))
+        if isinstance(word_count_advice, dict):
+            word_count_lines = self._structured_value_to_lines(word_count_advice)
+        else:
+            word_count_lines = self._structured_value_to_lines(word_count_advice)
+
+        suggest_lines = self._structured_value_to_lines(payload.get("suggest") or payload.get("suggestions"))
+
+        lines: List[str] = ["FEEDBACK:"]
+        if beat_lines or beat_result:
+            lines.append("BEAT CHECK:")
+            lines.extend(beat_lines or ["- No beat-check items returned."])
+            if beat_result:
+                lines.append(f"BEAT CHECK RESULT: {beat_result}")
+        if loop_result:
+            lines.append(f"LOOP CHECK RESULT: {loop_result}")
+        if loop_lines:
+            lines.extend(loop_lines)
+        if sentence_lines or sentence_result:
+            lines.append("SENTENCE LENGTH CHECK:")
+            lines.extend(sentence_lines or ["- No sentence-length findings returned."])
+            if sentence_result:
+                lines.append(f"SENTENCE LENGTH CHECK RESULT: {sentence_result}")
+        if word_count_lines:
+            lines.append("WORD COUNT ADVICE:")
+            lines.extend(word_count_lines)
+        if suggest_lines:
+            lines.append("SUGGEST:")
+            lines.extend(suggest_lines)
+        return "\n".join(line for line in lines if line.strip()).strip()
+
+    def _extract_editor_json_payload(self, editor_output: str) -> Optional[Dict]:
+        text = (editor_output or "").strip()
+        if not text:
+            return None
+
+        candidates: List[str] = [text]
+        fence_matches = re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+        candidates.extend(match.strip() for match in fence_matches if match.strip())
+        first_brace = text.find("{")
+        last_brace = text.rfind("}")
+        if first_brace != -1 and last_brace > first_brace:
+            candidates.append(text[first_brace:last_brace + 1].strip())
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    def _normalize_editor_markdown_labels(self, editor_output: str) -> str:
+        text = (editor_output or "").strip()
+        if not text:
+            return ""
+
+        labels = [
+            "FEEDBACK",
+            "BEAT CHECK",
+            "BEAT CHECK RESULT",
+            "LOOP CHECK RESULT",
+            "SENTENCE LENGTH CHECK",
+            "SENTENCE LENGTH CHECK RESULT",
+            "WORD COUNT ADVICE",
+            "SUGGEST",
+        ]
+        normalized = text
+        for label in labels:
+            normalized = re.sub(
+                rf"(?im)^\s*[-*]?\s*\*+\s*{re.escape(label)}\s*:\s*\*+\s*(PASS|FAIL)?\s*$",
+                lambda match: f"{label}: {match.group(1).upper()}" if match.group(1) else f"{label}:",
+                normalized,
+            )
+        return normalized
+
+    def _normalize_editor_output(self, editor_output: str) -> str:
+        payload = self._extract_editor_json_payload(editor_output)
+        if payload is not None:
+            normalized = self._build_editor_feedback_from_payload(payload)
+            if normalized:
+                return normalized
+        return self._normalize_editor_markdown_labels(editor_output)
+
     def _extract_labeled_block(self, text: str, label: str, stop_labels: List[str]) -> str:
         if not text:
             return ""
@@ -421,6 +716,7 @@ class BookGenerator:
         )
 
     def _compact_editor_feedback_for_retry(self, editor_output: str) -> str:
+        editor_output = self._normalize_editor_output(editor_output)
         if not editor_output:
             return ""
 
@@ -534,6 +830,7 @@ class BookGenerator:
         ]).strip()
 
     def _extract_beat_check_items(self, editor_output: str) -> List[str]:
+        editor_output = self._normalize_editor_output(editor_output)
         beat_check_block = self._extract_labeled_block(
             editor_output,
             "BEAT CHECK",
@@ -597,6 +894,7 @@ class BookGenerator:
         return ""
 
     def _extract_pass_fail_status(self, content: str, label: str) -> str:
+        content = self._normalize_editor_output(content)
         matches = re.findall(
             rf"(?im)^\s*[-*]?\s*{re.escape(label)}\s*:\s*(PASS|FAIL)\s*$",
             content or "",
@@ -922,6 +1220,8 @@ class BookGenerator:
         for msg in messages:
             content = msg.get("content", "")
             sender = self._get_sender(msg)
+            if sender == "editor":
+                content = self._normalize_editor_output(content)
             
             # Track chapter number
             if not current_chapter:
@@ -973,10 +1273,15 @@ class BookGenerator:
     
     def _prepare_chapter_context(self, chapter_number: int, prompt: str) -> str:
         """Prepare context for chapter generation"""
-        if chapter_number == 1 or not self.chapters_memory:
+        prior_chapters = [
+            self.chapter_memory[number]
+            for number in sorted(self.chapter_memory)
+            if number < chapter_number and self.chapter_memory[number]
+        ]
+        if chapter_number == 1 or not prior_chapters:
             return "No previous chapter summaries."
 
-        recent_memory = self.chapters_memory[-3:]
+        recent_memory = prior_chapters[-3:]
         context_parts = ["Previous Chapter Summaries:", *recent_memory]
         return "\n".join(context_parts)
 
@@ -1075,7 +1380,7 @@ class BookGenerator:
             required_beats,
             target_word_count,
         )
-        return self._run_agent_step(
+        editor_output = self._run_agent_step(
             chapter_number,
             chapter_title,
             attempt,
@@ -1085,6 +1390,7 @@ class BookGenerator:
             "feedback",
             detail,
         )
+        return self._normalize_editor_output(editor_output)
 
     def _finalize_chapter_result(
         self,
@@ -1128,7 +1434,10 @@ class BookGenerator:
         final_scene: str,
         required_beats: Optional[List[str]] = None,
         target_word_count: int = 0,
+        attempt: int = 0,
+        phase: str = "attempt",
     ) -> bool:
+        editor_output = self._normalize_editor_output(editor_output)
         beat_check_items = self._extract_beat_check_items(editor_output) if required_beats else []
         beat_check_complete = not required_beats or len(beat_check_items) >= len(required_beats)
         beat_check_status = self._extract_pass_fail_status(editor_output, "BEAT CHECK RESULT")
@@ -1178,11 +1487,12 @@ class BookGenerator:
             prose_integrity_message,
             word_count_message,
         ]
+        validation_text = "\n".join(validation_lines)
         self._log_block(
             f"CHAPTER {chapter_number} | VALIDATION",
-            "\n".join(validation_lines),
+            validation_text,
         )
-        return bool(
+        passed = bool(
             final_scene
             and beat_check_seen
             and beat_check_passed
@@ -1191,6 +1501,17 @@ class BookGenerator:
             and prose_integrity_passed
             and word_count_passed
         )
+        if not passed and self.validation_callback:
+            try:
+                self.validation_callback({
+                    "chapter_number": chapter_number,
+                    "attempt": attempt,
+                    "phase": phase,
+                    "body": validation_text,
+                })
+            except Exception as exc:
+                self._log(f"Validation callback failed for Chapter {chapter_number}: {exc}")
+        return passed
 
     def _draft_ready_for_final_check(
         self,
@@ -1199,6 +1520,7 @@ class BookGenerator:
         required_beats: Optional[List[str]],
         target_word_count: int,
     ) -> bool:
+        editor_output = self._normalize_editor_output(editor_output)
         if not draft_scene:
             return False
         if self._is_repetitive_output(draft_scene):
@@ -1259,6 +1581,7 @@ Requirements:
 - Do not include FEEDBACK, MEMORY UPDATE, PLAN, notes, bullets, or placeholders.
 - Keep the working material from the existing draft where it already satisfies the checklist.
 - Explicitly repair every unresolved checklist item in the order shown.
+- If the chapter summary includes Writing Style Guidance, follow it closely and preserve that prose direction in the revision.
 - Do not satisfy multiple numbered checklist items with one vague summary line if the individual beats need to appear distinctly on page.
 - Do not rewrite from scratch unless required to satisfy the checklist cleanly.
 - Missing, merging away, or reordering any numbered checklist item causes automatic rejection and another retry.
@@ -1293,6 +1616,7 @@ Requirements:
 - Write full prose, not notes or bullets.
 - Do not include FEEDBACK, MEMORY UPDATE, PLAN, or placeholders.
 - Preserve all required beats in the chapter prompt.
+- If the chapter summary includes Writing Style Guidance, follow it closely and let it shape the prose throughout the scene.
 - Treat the current-chapter beat anchors as the highest-priority narrative requirements for this scene.
 - Faithful paraphrase is encouraged; exact wording is not required.
 - Do not satisfy multiple numbered checklist items with one vague summary line if the individual beats need to appear distinctly on page.
@@ -1339,15 +1663,22 @@ Final Mandatory Checklist Before Writing:
         prompt_summary = self._summarize_chapter_requirements(prompt)
         return f"""Review the draft for Chapter {chapter_number}: {chapter_title}.
 
-Return FEEDBACK only. Do not write the final chapter.
+Return ONLY valid JSON. Do not write the final chapter.
+Do not wrap the JSON in markdown or code fences.
 
-Your FEEDBACK must include:
-- BEAT CHECK
-- BEAT CHECK RESULT: PASS or FAIL
-- LOOP CHECK RESULT: PASS or FAIL
-- SENTENCE LENGTH CHECK
-- SENTENCE LENGTH CHECK RESULT: PASS or FAIL
-- WORD COUNT ADVICE
+Use this exact JSON shape:
+{{
+  "beat_check": [
+    {{"index": 1, "beat": "required beat text", "status": "PASS", "evidence": "short evidence note"}}
+  ],
+  "beat_check_result": "PASS",
+  "loop_check_result": "PASS",
+  "loop_check_notes": ["short note"],
+  "sentence_length_check": ["short note"],
+  "sentence_length_check_result": "PASS",
+  "word_count_advice": "short paragraph",
+  "suggest": "optional short paragraph"
+}}
 
 In WORD COUNT ADVICE:
 - If the draft is too short, identify specific moments, exchanges, or paragraphs that should be expanded and explain what to add.
@@ -1355,6 +1686,7 @@ In WORD COUNT ADVICE:
 - If the length is acceptable, say that directly and explicitly state that no word-count changes are required.
 - Do not recommend trimming or padding only to hit the exact target if the draft is already inside the acceptable range.
 - Report whole-draft word count information only in WORD COUNT ADVICE, not in any other section.{range_instruction}
+- If the chapter summary includes Writing Style Guidance, check whether the draft materially follows it and call out meaningful style drift in the structured feedback.
 
 In BEAT CHECK:
 - Check the current-chapter beat anchors below item by item and in order.
@@ -1372,8 +1704,7 @@ In SENTENCE LENGTH CHECK:
 - Quote or paraphrase the first offending sentence fragment and include its approximate sentence-fragment word count.
 - Do not describe a sentence fragment count as the draft or chapter word count.
 - If no sentence exceeds {MAX_SENTENCE_WORDS} words, mark SENTENCE LENGTH CHECK RESULT: PASS.
-- The line 'LOOP CHECK RESULT:' must be a standalone exact line ending in only PASS or FAIL.
-- The line 'SENTENCE LENGTH CHECK RESULT:' must be a standalone exact line ending in only PASS or FAIL.
+- Every `status` value and every `*_result` value must be exactly `PASS` or `FAIL`.
 
 {beat_focus_block}
 
@@ -1441,6 +1772,7 @@ Requirements:
 - Change only the smallest number of sentences or paragraphs needed to fix the specific unresolved issues below.
 - Do not rewrite from scratch.
 - Do not include FEEDBACK, MEMORY UPDATE, PLAN, notes, bullets, or placeholders.
+- If the chapter summary includes Writing Style Guidance, preserve that prose direction while revising.
 - Do not copy prompt labels, checklist text, or retry context into the prose.
 - Treat the current-chapter beat anchors below as higher priority than generic outline bullets or editor paraphrases.
 - Faithful paraphrase is encouraged; exact wording is not required.
@@ -1475,6 +1807,7 @@ Requirements:
 - Output prose only.
 - Do not include FEEDBACK, MEMORY UPDATE, PLAN, notes, bullets, or placeholders.
 - Fix every issue raised by the editor while preserving required beats and scene momentum.
+- If the chapter summary includes Writing Style Guidance, preserve that prose direction while revising.
 - Treat the current-chapter beat anchors below as higher priority than generic outline bullets or editor paraphrases.
 - Faithful paraphrase is encouraged; exact wording is not required.
 - Do not satisfy multiple numbered checklist items with one vague summary line if the individual beats need to appear distinctly on page.
@@ -1516,19 +1849,52 @@ Accepted Chapter Text:
         self._log(f"\nGenerating Chapter {chapter_number}...")
         chapter_title = self.outline[chapter_number - 1]["title"]
         context = self._prepare_chapter_context(chapter_number, prompt)
-        required_beats, target_word_count = self._extract_required_chapter_details(prompt)
+        active_prompt = prompt
+        active_prompt_version: Optional[int] = None
         last_error = ""
         retry_guidance = ""
         prior_editor_output = ""
         prior_scene = ""
-        max_attempts = max(3, self.max_iterations)
+        base_attempt_budget = max(3, self.max_iterations)
+        max_attempts = base_attempt_budget
+        attempt = 1
 
-        for attempt in range(1, max_attempts + 1):
+        while attempt <= max_attempts:
             draft_scene = ""
             editor_output = ""
             final_scene = ""
             final_review_output = ""
             try:
+                self._raise_if_pause_requested(
+                    chapter_number,
+                    chapter_title,
+                    attempt,
+                    "Pause requested; stopping before the next chapter attempt.",
+                    "draft",
+                )
+                prompt_state = self._resolve_chapter_prompt_for_attempt(
+                    chapter_number,
+                    attempt,
+                    "attempt",
+                    active_prompt,
+                )
+                active_prompt = str(prompt_state.get("prompt") or active_prompt or "").strip()
+                prompt_version = int(prompt_state.get("version", 0) or 0)
+                details_summary = self._summarize_chapter_details(prompt_state.get("details") or {})
+                if active_prompt_version is None:
+                    active_prompt_version = prompt_version
+                elif prompt_version != active_prompt_version:
+                    active_prompt_version = prompt_version
+                    last_error = ""
+                    retry_guidance = ""
+                    prior_editor_output = ""
+                    prior_scene = ""
+                    max_attempts = max(max_attempts, attempt - 1 + base_attempt_budget)
+                    self._log_block(
+                        f"CHAPTER {chapter_number} | ATTEMPT {attempt} | CHAPTER ADVICE APPLIED | V{prompt_version}",
+                        details_summary or "The chapter prompt changed for this attempt.",
+                    )
+                required_beats, target_word_count = self._extract_required_chapter_details(active_prompt)
                 retry_context = ""
                 if last_error:
                     retry_context = (
@@ -1551,7 +1917,7 @@ Accepted Chapter Text:
                 writer_prompt = self._build_writer_prompt(
                     chapter_number,
                     chapter_title,
-                    prompt,
+                    active_prompt,
                     context,
                     required_beats,
                     target_word_count,
@@ -1559,6 +1925,13 @@ Accepted Chapter Text:
                     attempt,
                     prior_scene,
                     prior_editor_output,
+                )
+                self._raise_if_pause_requested(
+                    chapter_number,
+                    chapter_title,
+                    attempt,
+                    "Pause requested; stopping before writer draft.",
+                    "draft",
                 )
                 writer_output = self._run_agent_step(
                     chapter_number,
@@ -1588,11 +1961,18 @@ Accepted Chapter Text:
                 editor_prompt = self._build_editor_prompt(
                     chapter_number,
                     chapter_title,
-                    prompt,
+                    active_prompt,
                     context,
                     draft_scene,
                     required_beats,
                     target_word_count,
+                )
+                self._raise_if_pause_requested(
+                    chapter_number,
+                    chapter_title,
+                    attempt,
+                    "Pause requested; stopping before editor review.",
+                    "feedback",
                 )
                 editor_output = self._run_agent_step(
                     chapter_number,
@@ -1604,6 +1984,7 @@ Accepted Chapter Text:
                     "feedback",
                     "Editor is reviewing the draft",
                 )
+                editor_output = self._normalize_editor_output(editor_output)
                 prior_editor_output = editor_output
 
                 if self._draft_ready_for_final_check(
@@ -1634,13 +2015,20 @@ Accepted Chapter Text:
                     final_prompt = self._build_writer_final_prompt(
                         chapter_number,
                         chapter_title,
-                        prompt,
+                        active_prompt,
                         context,
                         draft_scene,
                         editor_output,
                         required_beats,
                         target_word_count,
                         final_retry_context,
+                    )
+                    self._raise_if_pause_requested(
+                        chapter_number,
+                        chapter_title,
+                        attempt,
+                        "Pause requested; stopping before writer final revision.",
+                        "revision",
                     )
                     final_output = self._run_agent_step(
                         chapter_number,
@@ -1667,10 +2055,17 @@ Accepted Chapter Text:
                     if not final_integrity_passed:
                         raise ValueError(final_integrity_message)
 
+                self._raise_if_pause_requested(
+                    chapter_number,
+                    chapter_title,
+                    attempt,
+                    "Pause requested; stopping before final validation review.",
+                    "feedback",
+                )
                 final_review_output = self._review_candidate_for_save(
                     chapter_number,
                     chapter_title,
-                    prompt,
+                    active_prompt,
                     context,
                     final_scene,
                     required_beats,
@@ -1686,6 +2081,8 @@ Accepted Chapter Text:
                     final_scene,
                     required_beats,
                     target_word_count,
+                    attempt,
+                    "attempt",
                 ):
                     raise ValueError(f"Chapter {chapter_number} generation incomplete")
 
@@ -1713,6 +2110,8 @@ Accepted Chapter Text:
                     "final_scene": final_scene,
                 }
 
+            except GenerationPauseRequested:
+                raise
             except Exception as exc:
                 last_error = str(exc)
                 retry_source = self._select_best_chapter_candidate(
@@ -1740,12 +2139,13 @@ Accepted Chapter Text:
                         f"Recoverable chapter failure detected. "
                         f"Retrying Chapter {chapter_number} with stronger guidance ({attempt}/{max_attempts})..."
                     )
+                    attempt += 1
                     continue
                 self._log(traceback.format_exc().rstrip())
                 if self._is_recoverable_chapter_error(exc):
                     return self._handle_chapter_generation_failure(
                         chapter_number,
-                        prompt,
+                        active_prompt,
                         last_error,
                         retry_guidance,
                         prior_scene,
@@ -1849,15 +2249,49 @@ Accepted Chapter Text:
         self._log(f"Attempting deterministic recovery for Chapter {chapter_number}...")
         chapter_title = self.outline[chapter_number - 1]["title"]
         context = self._prepare_chapter_context(chapter_number, prompt)
-        required_beats, target_word_count = self._extract_required_chapter_details(prompt)
+        active_prompt = prompt
+        active_prompt_version: Optional[int] = None
+        base_attempt_budget = max(3, self.max_iterations)
         max_retry_attempts = 2
+        retry_attempt = 1
 
-        for retry_attempt in range(1, max_retry_attempts + 1):
+        while retry_attempt <= max_retry_attempts:
             draft_scene = ""
             editor_output = ""
             final_scene = ""
             final_review_output = ""
             try:
+                attempt_number = self.max_iterations + retry_attempt
+                self._raise_if_pause_requested(
+                    chapter_number,
+                    chapter_title,
+                    attempt_number,
+                    "Pause requested; stopping before the next recovery attempt.",
+                    "draft",
+                )
+                prompt_state = self._resolve_chapter_prompt_for_attempt(
+                    chapter_number,
+                    attempt_number,
+                    "recovery",
+                    active_prompt,
+                )
+                active_prompt = str(prompt_state.get("prompt") or active_prompt or "").strip()
+                prompt_version = int(prompt_state.get("version", 0) or 0)
+                details_summary = self._summarize_chapter_details(prompt_state.get("details") or {})
+                if active_prompt_version is None:
+                    active_prompt_version = prompt_version
+                elif prompt_version != active_prompt_version:
+                    active_prompt_version = prompt_version
+                    last_error = ""
+                    retry_guidance = ""
+                    prior_editor_output = ""
+                    prior_scene = ""
+                    max_retry_attempts = max(max_retry_attempts, retry_attempt - 1 + base_attempt_budget)
+                    self._log_block(
+                        f"CHAPTER {chapter_number} | RECOVERY ATTEMPT {retry_attempt} | CHAPTER ADVICE APPLIED | V{prompt_version}",
+                        details_summary or "The chapter prompt changed for this recovery attempt.",
+                    )
+                required_beats, target_word_count = self._extract_required_chapter_details(active_prompt)
                 retry_context = ""
                 if last_error:
                     retry_context = (
@@ -1878,11 +2312,10 @@ Accepted Chapter Text:
                             f"{retry_feedback_focus}"
                         )
 
-                attempt_number = self.max_iterations + retry_attempt
                 writer_prompt = self._build_writer_prompt(
                     chapter_number,
                     chapter_title,
-                    prompt,
+                    active_prompt,
                     context,
                     required_beats,
                     target_word_count,
@@ -1890,6 +2323,13 @@ Accepted Chapter Text:
                     attempt_number,
                     prior_scene,
                     prior_editor_output,
+                )
+                self._raise_if_pause_requested(
+                    chapter_number,
+                    chapter_title,
+                    attempt_number,
+                    "Pause requested; stopping before recovery writer draft.",
+                    "draft",
                 )
                 writer_output = self._run_agent_step(
                     chapter_number,
@@ -1922,11 +2362,18 @@ Accepted Chapter Text:
                 editor_prompt = self._build_editor_prompt(
                     chapter_number,
                     chapter_title,
-                    prompt,
+                    active_prompt,
                     context,
                     draft_scene,
                     required_beats,
                     target_word_count,
+                )
+                self._raise_if_pause_requested(
+                    chapter_number,
+                    chapter_title,
+                    attempt_number,
+                    "Pause requested; stopping before recovery editor review.",
+                    "feedback",
                 )
                 editor_output = self._run_agent_step(
                     chapter_number,
@@ -1938,6 +2385,7 @@ Accepted Chapter Text:
                     "feedback",
                     "Editor is reviewing the recovery draft",
                 )
+                editor_output = self._normalize_editor_output(editor_output)
 
                 if self._draft_ready_for_final_check(
                     draft_scene,
@@ -1967,13 +2415,20 @@ Accepted Chapter Text:
                     final_prompt = self._build_writer_final_prompt(
                         chapter_number,
                         chapter_title,
-                        prompt,
+                        active_prompt,
                         context,
                         draft_scene,
                         editor_output,
                         required_beats,
                         target_word_count,
                         final_retry_context,
+                    )
+                    self._raise_if_pause_requested(
+                        chapter_number,
+                        chapter_title,
+                        attempt_number,
+                        "Pause requested; stopping before recovery writer final revision.",
+                        "revision",
                     )
                     final_output = self._run_agent_step(
                         chapter_number,
@@ -2003,10 +2458,17 @@ Accepted Chapter Text:
                     if not final_integrity_passed:
                         raise ValueError(final_integrity_message)
 
+                self._raise_if_pause_requested(
+                    chapter_number,
+                    chapter_title,
+                    attempt_number,
+                    "Pause requested; stopping before recovery final validation review.",
+                    "feedback",
+                )
                 final_review_output = self._review_candidate_for_save(
                     chapter_number,
                     chapter_title,
-                    prompt,
+                    active_prompt,
                     context,
                     final_scene,
                     required_beats,
@@ -2024,6 +2486,8 @@ Accepted Chapter Text:
                     final_scene,
                     required_beats,
                     target_word_count,
+                    attempt_number,
+                    "recovery",
                 ):
                     raise ValueError(f"Chapter {chapter_number} generation incomplete")
 
@@ -2045,6 +2509,8 @@ Accepted Chapter Text:
                     "final_scene": final_scene,
                 }
 
+            except GenerationPauseRequested:
+                raise
             except Exception as e:
                 last_error = str(e)
                 prior_scene = self._select_best_chapter_candidate(
@@ -2070,6 +2536,7 @@ Accepted Chapter Text:
                         f"Deterministic recovery attempt failed for Chapter {chapter_number}; "
                         f"trying again with stronger guidance ({retry_attempt}/{max_retry_attempts})..."
                     )
+                    retry_attempt += 1
                     continue
                 self._log(traceback.format_exc().rstrip())
                 self._log("Unable to generate chapter content after retry")
@@ -2091,8 +2558,10 @@ Accepted Chapter Text:
                 draft_text = self._extract_story_candidate(content, ["SCENE", "CHAPTER"], allow_raw_fallback=True)
                 if draft_text and self._looks_like_story_text(draft_text):
                     artifacts["draft_scene"] = draft_text
-            elif sender == "editor" and "FEEDBACK:" in content and not artifacts["editor_feedback"]:
-                artifacts["editor_feedback"] = content.split("FEEDBACK:", 1)[1].strip()
+            elif sender == "editor" and not artifacts["editor_feedback"]:
+                normalized_editor_feedback = self._normalize_editor_output(content)
+                if normalized_editor_feedback:
+                    artifacts["editor_feedback"] = normalized_editor_feedback
             elif sender in ["writer", "writer_final"]:
                 final_text = self._extract_story_candidate(
                     content,
@@ -2241,6 +2710,8 @@ Accepted Chapter Text:
                 artifacts["final_scene"],
                 required_beats,
                 target_word_count,
+                self.max_iterations + 2,
+                "recovery",
             ):
                 raise ValueError(f"Chapter {chapter_number} generation incomplete")
 

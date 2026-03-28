@@ -223,7 +223,6 @@ The current config format is JSON and centers around structured setup data. Exam
   "endpoint_url": "http://127.0.0.1:1234/v1",
   "outline_model": "nemomix-unleashed-12b",
   "writer_model": "nemomix-unleashed-12b",
-  "temperature": 0.8,
   "num_chapters": 10,
   "token_limit_enabled": true,
   "max_tokens": 8192,
