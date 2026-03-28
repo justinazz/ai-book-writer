@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,8 @@ from generation_controller import GenerationController, PromptSections
 
 
 controller = GenerationController()
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+STYLESHEET_PATH = os.path.join(STATIC_DIR, "ui.less")
 
 DEFAULT_PROMPT = """
 Create a story in my established writing style with these key elements:
@@ -58,7 +61,111 @@ def _load_external_config_payload(body: str) -> Dict:
     raise last_error
 
 
+def _project_name(snapshot) -> str:
+    return snapshot.config_name or "Current Book Project"
+
+
+def _mode_display(snapshot) -> str:
+    return "Auto" if snapshot.mode == "keep_going" else "Guided"
+
+
+def _status_display(status: str) -> str:
+    return (status or "idle").replace("_", " ").strip().title() or "Idle"
+
+
+def _phase_area(snapshot) -> str:
+    phase = (snapshot.phase or "").lower()
+    if snapshot.awaiting_outline_approval:
+        return "Planning"
+    if snapshot.current_chapter > 0 or snapshot.resume_available or snapshot.outline_approved:
+        return "Writing"
+    if "chapter" in phase or phase == "generation complete":
+        return "Writing"
+    return "Planning"
+
+
+def _status_tone(snapshot) -> str:
+    if snapshot.latest_error or snapshot.status == "failed":
+        return "error"
+    if snapshot.status == "completed":
+        return "success"
+    if snapshot.waiting_for_input or snapshot.status == "stopped":
+        return "warning"
+    if snapshot.run_active:
+        return "running"
+    return "accent"
+
+
+def _context_banner(snapshot) -> Dict[str, str]:
+    phase_area = _phase_area(snapshot)
+    if snapshot.latest_error:
+        return {
+            "level": "error",
+            "title": "Generation needs attention",
+            "body": snapshot.latest_error,
+        }
+    if snapshot.awaiting_outline_approval:
+        return {
+            "level": "warning",
+            "title": "Outline ready for review",
+            "body": "Stay in Planning to review the outline, add feedback, and approve or regenerate it.",
+        }
+    if snapshot.resume_available and not snapshot.run_active:
+        chapter_label = f"Chapter {snapshot.resume_chapter_number}" if snapshot.resume_chapter_number else "the latest checkpoint"
+        return {
+            "level": "accent",
+            "title": "A writing session is ready to resume",
+            "body": f"Open Writing to inspect the saved work, then press Continue to resume from {chapter_label}.",
+        }
+    if snapshot.waiting_for_input:
+        if phase_area == "Planning":
+            return {
+                "level": "warning",
+                "title": snapshot.current_checkpoint_title or "Waiting for outline review",
+                "body": "Use Planning to inspect the outline, add feedback if needed, then approve or regenerate it.",
+            }
+        return {
+            "level": "warning",
+            "title": snapshot.current_checkpoint_title or "Waiting for guidance",
+            "body": "Use Writing to inspect the checkpoint, queue advice if needed, then continue.",
+        }
+    if snapshot.run_active:
+        return {
+            "level": "running",
+            "title": snapshot.phase or "Generation running",
+            "body": snapshot.progress.detail or "The system is actively moving through the current generation phase.",
+        }
+    if snapshot.outline_approved:
+        return {
+            "level": "success",
+            "title": "Planning is approved",
+            "body": "Switch to Writing to monitor chapters, inspect output, or regenerate a specific chapter.",
+        }
+    if snapshot.outline_text:
+        return {
+            "level": "accent",
+            "title": "Outline drafted",
+            "body": "Review it in Planning and decide whether to approve it or ask for another pass.",
+        }
+    return {
+        "level": "accent",
+        "title": "Start in Planning",
+        "body": "Shape the story brief, chapter structure, and runtime settings before starting a run.",
+    }
+
+
+def _selected_chapter_number(snapshot) -> int:
+    if snapshot.current_chapter:
+        return snapshot.current_chapter
+    for chapter in snapshot.chapters:
+        review = snapshot.chapter_reviews.get(chapter.number)
+        if review and review.saved_text:
+            return chapter.number
+    return snapshot.chapters[0].number if snapshot.chapters else 0
+
+
 def _render_page() -> bytes:
+    return _render_page_v2()
     snapshot = controller.get_snapshot()
     if snapshot.resume_available and not snapshot.run_active:
         mode_label = f"Ready to resume from Chapter {snapshot.resume_chapter_number}"
@@ -1060,15 +1167,571 @@ def _render_page() -> bytes:
     return html.encode("utf-8")
 
 
+def _render_page_v2() -> bytes:
+    snapshot = controller.get_snapshot()
+    prepared = _prepare_page_context(snapshot)
+    initial_state = json.dumps(_snapshot_payload(snapshot))
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Book Writer Workspace</title>
+  <link rel="stylesheet" href="/static/ui.less">
+</head>
+<body>
+  <div class="app-shell">
+    {_render_topbar(prepared)}
+    {_render_context_banner(prepared)}
+    {_render_primary_tabs(prepared)}
+    <main class="tab-panels">
+      {_render_planning_tab(prepared)}
+      {_render_writing_tab(prepared)}
+      {_render_editing_tab()}
+    </main>
+  </div>
+  <div id="textarea-modal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="textarea-modal-title">Expanded Editor</h2>
+        <button type="button" id="textarea-modal-close" class="secondary">&#10005; Close</button>
+      </div>
+      <textarea id="textarea-modal-input" aria-label="Expanded editor"></textarea>
+    </div>
+  </div>
+  <script>
+    window.__BOOK_UI_INITIAL_STATE__ = {initial_state};
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
+"""
+    return html.encode("utf-8")
+
+
+def _prepare_page_context(snapshot) -> Dict[str, object]:
+    if snapshot.resume_available and not snapshot.run_active:
+        mode_label = f"Ready to resume from Chapter {snapshot.resume_chapter_number}"
+    elif snapshot.status == "stopped":
+        mode_label = "Paused"
+    elif snapshot.stop_requested and snapshot.run_active:
+        mode_label = "Pausing after the current chapter step"
+    else:
+        mode_label = "Keep Going" if snapshot.mode == "keep_going" else "Ask for Advice"
+
+    waiting = "Yes" if snapshot.waiting_for_input else "No"
+    can_start = not snapshot.run_active
+    can_control = snapshot.run_active
+    can_queue_chapter_advice = snapshot.run_active or snapshot.resume_available
+    can_continue = (
+        (snapshot.run_active and snapshot.waiting_for_input and not snapshot.awaiting_outline_approval)
+        or (snapshot.resume_available and not snapshot.awaiting_outline_approval)
+    )
+    phase_area = _phase_area(snapshot)
+    status_display = _status_display(snapshot.status)
+    mode_display = _mode_display(snapshot)
+    banner = _context_banner(snapshot)
+    outline_status_text = (
+        "Approved"
+        if snapshot.outline_approved
+        else ("Awaiting review" if snapshot.awaiting_outline_approval else "Not approved yet")
+    )
+    selected_number = _selected_chapter_number(snapshot)
+    selected_chapter = next((chapter for chapter in snapshot.chapters if chapter.number == selected_number), None)
+    selected_review = snapshot.chapter_reviews.get(selected_number)
+    chapter_items = (
+        "".join(
+            _render_chapter_item(chapter.number, chapter.title, chapter.status, chapter.number == selected_number)
+            for chapter in snapshot.chapters
+        )
+        or "<li class='chapter chapter--placeholder'><span class='chapter-title'>No chapters yet.</span></li>"
+    )
+    model_list = snapshot.available_models or [snapshot.outline_model, snapshot.writer_model]
+    unique_models = [model for index, model in enumerate(model_list) if model and model not in model_list[:index]]
+    return {
+        "snapshot": snapshot,
+        "mode_label": mode_label,
+        "waiting": waiting,
+        "can_start": can_start,
+        "can_control": can_control,
+        "can_queue_chapter_advice": can_queue_chapter_advice,
+        "can_continue": can_continue,
+        "phase_area": phase_area,
+        "status_display": status_display,
+        "status_tone": _status_tone(snapshot),
+        "mode_display": mode_display,
+        "project_name": _project_name(snapshot),
+        "banner": banner,
+        "outline_status_text": outline_status_text,
+        "selected_chapter_number": selected_number,
+        "selected_chapter_title": (
+            f"Chapter {selected_chapter.number}: {selected_chapter.title}"
+            if selected_chapter
+            else "Chapter workspace"
+        ),
+        "selected_chapter_status": _status_display(selected_chapter.status) if selected_chapter else "Not started",
+        "selected_chapter_text": (
+            selected_review.saved_text
+            if selected_review and selected_review.saved_text
+            else "Select a chapter from the left rail or start a run to read generated text here."
+        ),
+        "selected_artifacts": _render_artifacts(selected_review),
+        "chapter_items": chapter_items,
+        "outline_text": snapshot.outline_text or "Outline not generated yet.",
+        "checkpoint_body": snapshot.current_checkpoint_body or "Nothing to review yet.",
+        "models": _render_options(unique_models, snapshot.outline_model),
+        "writer_models": _render_options(unique_models, snapshot.writer_model),
+        "sections": snapshot.prompt_sections if snapshot.prompt_sections.premise else DEFAULT_SECTIONS,
+        "chapter_details": snapshot.chapter_details or {},
+        "model_error": snapshot.model_fetch_error or "No model errors.",
+        "saved_configs": _render_saved_config_options(snapshot.saved_configs),
+        "progress_events": "\n".join(reversed(snapshot.progress_events)) or "No progress events yet.",
+        "continuity_text": _render_continuity(snapshot),
+        "outline_feedback": snapshot.outline_feedback or "",
+        "recent_events_text": "\n".join(snapshot.recent_events) or "No events yet.",
+        "config_name": snapshot.config_name or "",
+    }
+
+
+def _render_topbar(context: Dict[str, object]) -> str:
+    snapshot = context["snapshot"]
+    start_label = "Start New Run" if snapshot.resume_available and not snapshot.run_active else "Start Run"
+    continue_label = "Resume Run" if snapshot.resume_available and not snapshot.run_active else "Continue"
+    return f"""
+    <header class="app-topbar">
+      <div class="app-topbar__identity">
+        <div>
+          <div class="eyebrow">Book Writer Workspace</div>
+          <h1 data-bind="project-name">{escape(str(context["project_name"]))}</h1>
+        </div>
+        <div class="status-cluster">
+          <span class="status-chip status-chip--{escape(str(context["status_tone"]))}" id="overall-status-chip" data-bind="status-display">{escape(str(context["status_display"]))}</span>
+          <span class="status-chip status-chip--muted" data-bind="phase-area">{escape(str(context["phase_area"]))}</span>
+          <span class="status-chip status-chip--muted" data-bind="mode-display">{escape(str(context["mode_display"]))}</span>
+        </div>
+      </div>
+      <div class="app-topbar__metrics">
+        <div class="metric-card">
+          <span class="metric-label">Live phase</span>
+          <div class="metric-value status-line" id="phase-status"><span id="live-spinner" class="spinner-shell{' active' if snapshot.busy else ''}"><span class="spinner-dot"></span></span>{escape(snapshot.phase or "Idle")}</div>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Current chapter</span>
+          <div class="metric-value" data-bind="current-chapter">{snapshot.current_chapter} / {snapshot.total_chapters}</div>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Waiting for input</span>
+          <div class="metric-value" data-bind="waiting-input">{escape(str(context["waiting"]))}</div>
+        </div>
+      </div>
+      <div class="app-topbar__controls">
+        <button id="start-button" type="submit" form="run-setup-form" {"disabled" if not context["can_start"] else ""}>&#9889; {escape(start_label)}</button>
+        <form method="post" action="/mode" class="async-form inline-form">
+          <input type="hidden" name="mode" value="keep_going">
+          <button id="keep-going-button" class="secondary" {"disabled" if not context["can_control"] else ""}>Auto</button>
+        </form>
+        <form method="post" action="/mode" class="async-form inline-form">
+          <input type="hidden" name="mode" value="ask_for_advice">
+          <button id="ask-advice-button" class="secondary" {"disabled" if not context["can_control"] else ""}>Guided</button>
+        </form>
+        <form method="post" action="/continue" class="async-form inline-form">
+          <button id="continue-button" {"disabled" if not context["can_continue"] else ""}>&#9658; {escape(continue_label)}</button>
+        </form>
+        <form method="post" action="/stop" class="async-form inline-form">
+          <button id="stop-button" class="danger" {"disabled" if not context["can_control"] else ""}>&#9208; Pause</button>
+        </form>
+      </div>
+    </header>
+    """
+
+
+def _render_context_banner(context: Dict[str, object]) -> str:
+    banner = context["banner"]
+    return f"""
+    <section class="context-banner context-banner--{escape(str(banner["level"]))}" id="context-banner">
+      <div class="context-banner__copy">
+        <div class="eyebrow">Next Step</div>
+        <h2 id="context-banner-title">{escape(str(banner["title"]))}</h2>
+        <p id="context-banner-body">{escape(str(banner["body"]))}</p>
+      </div>
+      <div class="context-banner__meta">
+        <div class="mini-metric">
+          <span>Mode</span>
+          <strong id="context-mode-label">{escape(str(context["mode_label"]))}</strong>
+        </div>
+        <div class="mini-metric">
+          <span>Outline</span>
+          <strong data-bind="outline-status-summary">{escape(str(context["outline_status_text"]))}</strong>
+        </div>
+      </div>
+    </section>
+    """
+
+
+def _render_primary_tabs(context: Dict[str, object]) -> str:
+    planning_active = context["phase_area"] == "Planning"
+    writing_active = context["phase_area"] == "Writing"
+    return f"""
+    <nav class="primary-tabs" aria-label="Primary">
+      <button type="button" class="tab-button{' active' if planning_active else ''}" id="tab-planning" data-tab-target="planning" aria-selected="{'true' if planning_active else 'false'}">Planning</button>
+      <button type="button" class="tab-button{' active' if writing_active else ''}" id="tab-writing" data-tab-target="writing" aria-selected="{'true' if writing_active else 'false'}">Writing</button>
+      <button type="button" class="tab-button" id="tab-editing" data-tab-target="editing" aria-selected="false">Editing</button>
+    </nav>
+    """
+
+
+def _render_planning_tab(context: Dict[str, object]) -> str:
+    snapshot = context["snapshot"]
+    sections = context["sections"]
+    return f"""
+      <section class="tab-panel{' active' if context["phase_area"] == "Planning" else ''}" data-tab="planning">
+        <div class="planning-layout">
+          <aside class="workflow-sidebar">
+            <section class="workspace-card">
+              <div class="eyebrow">Workflow</div>
+              <h2>Planning Steps</h2>
+              <div class="step-list">
+                <button type="button" class="step-link" data-scroll-target="planning-brief">Story Brief</button>
+                <button type="button" class="step-link" data-scroll-target="planning-structure">Structure</button>
+                <button type="button" class="step-link" data-scroll-target="planning-runtime">Models &amp; Runtime</button>
+                <button type="button" class="step-link" data-scroll-target="planning-outline-review">Outline Review</button>
+              </div>
+            </section>
+            <section class="workspace-card">
+              <div class="eyebrow">Run Snapshot</div>
+              <h2>Current State</h2>
+              <div class="info-list">
+                <div class="info-row"><span>Status</span><strong data-bind="status-display">{escape(str(context["status_display"]))}</strong></div>
+                <div class="info-row"><span>Phase area</span><strong data-bind="phase-area">{escape(str(context["phase_area"]))}</strong></div>
+                <div class="info-row"><span>Mode</span><strong data-bind="mode-display">{escape(str(context["mode_display"]))}</strong></div>
+                <div class="info-row"><span>Waiting</span><strong data-bind="waiting-input">{escape(str(context["waiting"]))}</strong></div>
+                <div class="info-row"><span>Current chapter</span><strong data-bind="current-chapter">{snapshot.current_chapter} / {snapshot.total_chapters}</strong></div>
+                <div class="info-row"><span>Outline</span><strong data-bind="outline-status-summary">{escape(str(context["outline_status_text"]))}</strong></div>
+              </div>
+            </section>
+            <section class="workspace-card">
+              <div class="eyebrow">Guided Review</div>
+              <p class="support-copy">Guided mode pauses at checkpoints so you can inspect the outline or latest chapter, add direction, and continue when you are ready.</p>
+            </section>
+          </aside>
+
+          <form id="run-setup-form" method="post" action="/start" class="async-form planning-form">
+            <section class="workspace-card" id="planning-brief">
+              <div class="section-heading">
+                <div>
+                  <div class="eyebrow">Planning</div>
+                  <h2>Story Brief</h2>
+                </div>
+                <p class="support-copy">This is the creative foundation for the whole book. Treat it like the source of truth for the project.</p>
+              </div>
+              <div class="field-stack">
+                <label class="label" for="premise">Premise</label>
+                <textarea id="premise" name="premise">{escape(sections.premise)}</textarea>
+                <label class="label" for="storylines">Storylines / Arcs</label>
+                <textarea id="storylines" name="storylines">{escape(sections.storylines)}</textarea>
+                <label class="label" for="setting">Setting / World</label>
+                <textarea id="setting" name="setting">{escape(sections.setting)}</textarea>
+                <label class="label" for="characters">Characters</label>
+                <textarea id="characters" name="characters">{escape(sections.characters)}</textarea>
+                <label class="label" for="writing_style">Writing Style</label>
+                <textarea id="writing_style" name="writing_style">{escape(sections.writing_style)}</textarea>
+                <label class="label" for="tone">Tone</label>
+                <textarea id="tone" name="tone">{escape(sections.tone)}</textarea>
+                <label class="label" for="plot_beats">Important Plot Beats</label>
+                <textarea id="plot_beats" name="plot_beats">{escape(sections.plot_beats)}</textarea>
+                <label class="label" for="constraints">Constraints / Must Include</label>
+                <textarea id="constraints" name="constraints">{escape(sections.constraints)}</textarea>
+              </div>
+            </section>
+
+            <section class="workspace-card" id="planning-structure">
+              <div class="section-heading">
+                <div>
+                  <div class="eyebrow">Planning</div>
+                  <h2>Structure</h2>
+                </div>
+                <p class="support-copy">Set the chapter scaffold and chapter-specific anchors here so the outline and writing phases stay aligned.</p>
+              </div>
+              <div class="field-grid-two">
+                <div>
+                  <label class="label" for="num_chapters">Number of Chapters</label>
+                  <input id="num_chapters" type="number" min="1" max="100" name="num_chapters" value="{snapshot.num_chapters}">
+                </div>
+                <div>
+                  <label class="label" for="chapter_target_word_count">Chapter Target Word Count</label>
+                  <input id="chapter_target_word_count" type="number" min="0" max="50000" name="chapter_target_word_count" value="{snapshot.chapter_target_word_count}">
+                </div>
+              </div>
+              <div class="chapter-editor-shell">
+                <div class="subheading">Chapter details</div>
+                <div id="chapter-details-editor">
+                  {_render_chapter_details_inputs(snapshot.num_chapters, context["chapter_details"])}
+                </div>
+              </div>
+            </section>
+
+            <section class="workspace-card" id="planning-runtime">
+              <div class="section-heading">
+                <div>
+                  <div class="eyebrow">Planning</div>
+                  <h2>Models &amp; Runtime</h2>
+                </div>
+                <p class="support-copy">Keep the technical setup together here so the creative setup is not mixed with transport and model tuning.</p>
+              </div>
+              <div class="field-stack">
+                <label class="label" for="endpoint_url">API Endpoint</label>
+                <input id="endpoint_url" type="text" name="endpoint_url" value="{escape(snapshot.endpoint_url)}">
+                <div class="controls">
+                  <button formaction="/refresh-models" class="secondary">&#10227; Refresh Models</button>
+                </div>
+                <div class="field-grid-two">
+                  <div>
+                    <label class="label" for="outline_model">Outline Model</label>
+                    <select id="outline_model" name="outline_model">{context["models"]}</select>
+                  </div>
+                  <div>
+                    <label class="label" for="writer_model">Writer Model</label>
+                    <select id="writer_model" name="writer_model">{context["writer_models"]}</select>
+                  </div>
+                </div>
+                <div class="field-grid-three">
+                  <div>
+                    <label class="label" for="token_limit_enabled">Token Limit</label>
+                    <select id="token_limit_enabled" name="token_limit_enabled">
+                      <option value="on"{" selected" if snapshot.token_limit_enabled else ""}>On</option>
+                      <option value="off"{" selected" if not snapshot.token_limit_enabled else ""}>Off</option>
+                    </select>
+                  </div>
+                  <div id="max-tokens-group" style="display: {"block" if snapshot.token_limit_enabled else "none"};">
+                    <label class="label" for="max_tokens">Max Tokens</label>
+                    <input id="max_tokens" type="number" min="128" max="64000" name="max_tokens" value="{snapshot.max_tokens}">
+                  </div>
+                  <div>
+                    <label class="label" for="max_iterations">Max Iterations</label>
+                    <input id="max_iterations" type="number" min="1" max="{MAX_ITERATIONS_LIMIT}" name="max_iterations" value="{snapshot.max_iterations}">
+                  </div>
+                </div>
+                <label class="label" for="reduce_thinking">Thinking Mode</label>
+                <select id="reduce_thinking" name="reduce_thinking">
+                  <option value="off"{" selected" if not snapshot.reduce_thinking else ""}>Normal</option>
+                  <option value="on"{" selected" if snapshot.reduce_thinking else ""}>No Thinking</option>
+                </select>
+              </div>
+            </section>
+          </form>
+
+          <aside class="planning-rail">
+            <section class="workspace-card" id="planning-outline-review">
+              <div class="section-heading">
+                <div>
+                  <div class="eyebrow">Planning</div>
+                  <h2>Outline Review</h2>
+                </div>
+                <span class="status-chip status-chip--muted" data-bind="outline-status-summary">{escape(str(context["outline_status_text"]))}</span>
+              </div>
+              <div class="inline-note" id="outline-approval-status">Approved: {"Yes" if snapshot.outline_approved else "No"} | Awaiting approval: {"Yes" if snapshot.awaiting_outline_approval else "No"}</div>
+              <form method="post" action="/outline-feedback" class="async-form">
+                <label class="label" for="outline_feedback">Outline Feedback</label>
+                <textarea id="outline_feedback" name="outline_feedback" placeholder="Ask for pacing changes, stronger arcs, better chapter titles, more detail, or structural fixes.">{escape(str(context["outline_feedback"]))}</textarea>
+                <div class="controls">
+                  <button class="secondary">&#9998; Save Feedback</button>
+                </div>
+              </form>
+              <form method="post" action="/approve-outline" class="async-form">
+                <div class="controls">
+                  <button id="approve-outline-button" {"disabled" if not snapshot.awaiting_outline_approval else ""}>&#10003; Approve Outline</button>
+                  <button id="regen-outline-button" formaction="/regenerate-outline" class="secondary" {"disabled" if not snapshot.awaiting_outline_approval else ""}>&#8635; Regenerate Outline</button>
+                </div>
+              </form>
+              <div class="subheading">Generated outline</div>
+              <pre id="outline-text" class="longform-view">{escape(str(context["outline_text"]))}</pre>
+            </section>
+
+            <section class="workspace-card">
+              <div class="eyebrow">Utilities</div>
+              <h2>Configs</h2>
+              <form method="post" action="/save-config" class="async-form">
+                <label class="label" for="config_name">Save Current Setup</label>
+                <input id="config_name" type="text" name="config_name" placeholder="Example: Dane thriller v1" value="{escape(str(context["config_name"]))}">
+                <div class="controls">
+                  <button class="secondary">&#128190; Save Config</button>
+                </div>
+              </form>
+              <form method="post" action="/load-config" class="async-form">
+                <label class="label" for="config_file">Load Saved Setup</label>
+                <select id="config_file" name="config_file">{context["saved_configs"]}</select>
+                <div class="controls">
+                  <button class="secondary">&#128194; Load Config</button>
+                </div>
+              </form>
+              <div class="controls">
+                <button id="external-config-button" class="secondary" type="button">&#128194; Load External Config</button>
+                <button id="save-external-config-button" class="secondary" type="button">&#128190; Save External Config</button>
+                <input id="external-config-input" type="file" accept=".json,application/json" style="display:none;">
+              </div>
+            </section>
+
+            <section class="workspace-card">
+              <div class="eyebrow">Diagnostics</div>
+              <h2>Model Status</h2>
+              <pre id="model-error">{escape(str(context["model_error"]))}</pre>
+            </section>
+          </aside>
+        </div>
+      </section>
+    """
+
+
+def _render_writing_tab(context: Dict[str, object]) -> str:
+    snapshot = context["snapshot"]
+    return f"""
+      <section class="tab-panel{' active' if context["phase_area"] == "Writing" else ''}" data-tab="writing">
+        <div class="writing-layout">
+          <aside class="chapter-sidebar">
+            <section class="workspace-card sticky-card">
+              <div class="eyebrow">Writing</div>
+              <h2>Chapters</h2>
+              <ul class="chapter-list" id="chapter-list">
+                {context["chapter_items"]}
+              </ul>
+            </section>
+          </aside>
+
+          <div class="writing-main">
+            <section class="workspace-card phase-box" id="checkpoint-box">
+              <div class="eyebrow">Checkpoint</div>
+              <h2 id="checkpoint-title">{escape(snapshot.current_checkpoint_title or "Waiting for the first checkpoint.")}</h2>
+              <pre id="checkpoint-body">{escape(str(context["checkpoint_body"]))}</pre>
+            </section>
+
+            <section class="workspace-card chapter-reader-card">
+              <div class="section-heading">
+                <div>
+                  <div class="eyebrow">Writing Workspace</div>
+                  <h2 id="selected-chapter-title">{escape(str(context["selected_chapter_title"]))}</h2>
+                </div>
+                <span class="status-chip status-chip--muted" id="selected-chapter-status">{escape(str(context["selected_chapter_status"]))}</span>
+              </div>
+              <pre id="selected-chapter-content" class="longform-view chapter-view">{escape(str(context["selected_chapter_text"]))}</pre>
+            </section>
+          </div>
+
+          <aside class="writing-rail">
+            <section class="workspace-card">
+              <div class="eyebrow">Intervention</div>
+              <h2>Chapter Tools</h2>
+              <form method="post" action="/chapter-advice" class="async-form">
+                <label class="label" for="chapter_advice_number">Chapter Number</label>
+                <input id="chapter_advice_number" type="number" min="1" max="{snapshot.total_chapters or snapshot.num_chapters or 1}" name="chapter_number" value="{context["selected_chapter_number"] or snapshot.current_chapter or 1}">
+                <label class="label" for="advice">Replacement beats for the next attempt</label>
+                <textarea class="advice-box" id="advice" name="advice" placeholder="Example: 1. He stalls at the threshold. 2. She notices the blood on his cuff. 3. Their argument expands into the hidden ledger reveal."></textarea>
+                <label class="label" for="chapter_advice_target_word_count">Optional replacement target word count</label>
+                <input id="chapter_advice_target_word_count" type="number" min="0" max="50000" name="target_word_count" value="">
+                <div class="controls">
+                  <button id="chapter-advice-button" {"disabled" if not context["can_queue_chapter_advice"] else ""}>&#10148; Queue Chapter Advice</button>
+                </div>
+              </form>
+              <form method="post" action="/regenerate-chapter" class="async-form">
+                <label class="label" for="regen_chapter_number">Regenerate Chapter</label>
+                <input id="regen_chapter_number" type="number" min="1" max="{snapshot.total_chapters or snapshot.num_chapters or 1}" name="chapter_number" value="{context["selected_chapter_number"] or snapshot.current_chapter or 1}">
+                <div class="controls">
+                  <button id="regen-chapter-button" {"disabled" if snapshot.run_active else ""}>&#8635; Regenerate Chapter</button>
+                </div>
+              </form>
+              <div class="subheading">Last queued advice</div>
+              <pre id="last-advice">{escape(snapshot.latest_advice or "No advice submitted yet.")}</pre>
+            </section>
+
+            <section class="workspace-card">
+              <div class="eyebrow">Activity</div>
+              <h2>Live Progress</h2>
+              <div class="subgrid">
+                <div class="metric-box"><span class="label">Current Agent</span><pre id="progress-agent">{escape(snapshot.progress.current_agent or "Idle")}</pre></div>
+                <div class="metric-box"><span class="label">Current Step</span><pre id="progress-step">{escape(snapshot.progress.current_step or "Idle")}</pre></div>
+                <div class="metric-box"><span class="label">Iteration</span><pre id="progress-iteration">{snapshot.progress.iteration or 0}/{snapshot.progress.max_iterations or 0}</pre></div>
+                <div class="metric-box"><span class="label">Output Stage</span><pre id="progress-stage">{escape(snapshot.progress.output_stage or "n/a")}</pre></div>
+              </div>
+              <div class="subheading">Progress detail</div>
+              <pre id="progress-detail">{escape(snapshot.progress.detail or "No active detail yet.")}</pre>
+              <div class="subheading">Progress timeline</div>
+              <pre id="progress-events">{escape(str(context["progress_events"]))}</pre>
+            </section>
+
+            <section class="workspace-card">
+              <div class="eyebrow">Inspector</div>
+              <h2>Chapter Artifacts</h2>
+              <pre id="chapter-artifacts">{escape(str(context["selected_artifacts"]))}</pre>
+            </section>
+
+            <section class="workspace-card">
+              <div class="eyebrow">Inspector</div>
+              <h2>Continuity</h2>
+              <pre id="continuity-panel">{escape(str(context["continuity_text"]))}</pre>
+            </section>
+
+            <section class="workspace-card">
+              <div class="eyebrow">Reference</div>
+              <h2>Approved Outline</h2>
+              <pre id="outline-reference" class="longform-view">{escape(str(context["outline_text"]))}</pre>
+            </section>
+
+            <section class="workspace-card">
+              <div class="eyebrow">Diagnostics</div>
+              <h2>Errors &amp; Events</h2>
+              <div class="subheading">Latest error</div>
+              <pre id="latest-error">{escape(snapshot.latest_error or "No errors recorded.")}</pre>
+              <div class="subheading">Recent events</div>
+              <pre id="recent-events">{escape(str(context["recent_events_text"]))}</pre>
+            </section>
+          </aside>
+        </div>
+      </section>
+    """
+
+
+def _render_editing_tab() -> str:
+    return """
+      <section class="tab-panel" data-tab="editing">
+        <div class="editing-layout">
+          <section class="workspace-card">
+            <div class="eyebrow">Future Phase</div>
+            <h2>Editing Workspace</h2>
+            <p class="support-copy">This area is reserved for the later companion workflow: reopen a saved book project, revise chapters, amplify scenes, and grow the book over time.</p>
+            <div class="feature-list">
+              <div class="feature-pill">Reload an existing book state</div>
+              <div class="feature-pill">Targeted chapter refinement</div>
+              <div class="feature-pill">Alternates and revision history</div>
+              <div class="feature-pill">Continuity-aware updates</div>
+              <div class="feature-pill">Future chapter insertion</div>
+            </div>
+          </section>
+          <section class="workspace-card">
+            <div class="eyebrow">Missing Piece</div>
+            <h2>What Editing Needs First</h2>
+            <p class="support-copy">The UI shell is ready for Editing, but the product still needs a persistent Book Project state that combines config, outline, chapter text, artifacts, continuity, and revision history into one resumable unit.</p>
+            <pre>Book Project = setup + outline + chapters + artifacts + continuity + revision history</pre>
+          </section>
+        </div>
+      </section>
+    """
+
+
 class BookUIHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/events":
+        path = self.path.split("?", 1)[0]
+        if path == "/events":
             self._send_event_stream()
             return
-        if self.path == "/state":
+        if path == "/state":
             self._send_state()
             return
-        if self.path != "/":
+        if path == "/static/ui.less":
+            self._send_static(STYLESHEET_PATH, "text/css; charset=utf-8")
+            return
+        if path == "/static/app.js":
+            self._send_static(os.path.join(STATIC_DIR, "app.js"), "application/javascript; charset=utf-8")
+            return
+        if path != "/":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
 
@@ -1080,12 +1743,13 @@ class BookUIHandler(BaseHTTPRequestHandler):
         self.wfile.write(page)
 
     def do_POST(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode("utf-8")
         form = parse_qs(body)
         is_async = self.headers.get("X-Requested-With", "") == "fetch"
 
-        if self.path == "/start":
+        if path == "/start":
             num_chapters = int(_first(form, "num_chapters", "10") or "10")
             chapter_details = _extract_chapter_details(form, num_chapters)
             sections = PromptSections(
@@ -1111,9 +1775,9 @@ class BookUIHandler(BaseHTTPRequestHandler):
                 int(_first(form, "max_iterations", "5") or "5"),
                 int(_first(form, "chapter_target_word_count", "0") or "0"),
             )
-        elif self.path == "/refresh-models":
+        elif path == "/refresh-models":
             controller.refresh_models(_first(form, "endpoint_url", ""))
-        elif self.path == "/save-config":
+        elif path == "/save-config":
             if "premise" in form or "num_chapters" in form:
                 num_chapters = int(_first(form, "num_chapters", "10") or "10")
                 chapter_details = _extract_chapter_details(form, num_chapters)
@@ -1143,9 +1807,9 @@ class BookUIHandler(BaseHTTPRequestHandler):
                 )
             else:
                 controller.save_config(_first(form, "config_name", ""))
-        elif self.path == "/load-config":
+        elif path == "/load-config":
             controller.load_config(_first(form, "config_file", ""))
-        elif self.path == "/load-external-config":
+        elif path == "/load-external-config":
             try:
                 payload = _load_external_config_payload(body)
             except json.JSONDecodeError as exc:
@@ -1163,18 +1827,18 @@ class BookUIHandler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, message)
                 return
             controller.load_config_payload(payload, "Loaded external config")
-        elif self.path == "/outline-feedback":
+        elif path == "/outline-feedback":
             controller.set_outline_feedback(_first(form, "outline_feedback", ""))
-        elif self.path == "/approve-outline":
+        elif path == "/approve-outline":
             controller.approve_outline()
-        elif self.path == "/regenerate-outline":
+        elif path == "/regenerate-outline":
             controller.set_outline_feedback(_first(form, "outline_feedback", ""))
             controller.regenerate_outline()
-        elif self.path == "/mode":
+        elif path == "/mode":
             controller.set_mode(_first(form, "mode", "keep_going"))
-        elif self.path == "/continue":
+        elif path == "/continue":
             controller.continue_run()
-        elif self.path in {"/advice", "/chapter-advice"}:
+        elif path in {"/advice", "/chapter-advice"}:
             snapshot = controller.get_snapshot()
             chapter_number_raw = _first(form, "chapter_number", str(snapshot.current_chapter or 1))
             try:
@@ -1191,9 +1855,9 @@ class BookUIHandler(BaseHTTPRequestHandler):
                 _first(form, "advice", ""),
                 target_word_count,
             )
-        elif self.path == "/regenerate-chapter":
+        elif path == "/regenerate-chapter":
             controller.regenerate_chapter(int(_first(form, "chapter_number", "1") or "1"))
-        elif self.path == "/stop":
+        elif path == "/stop":
             controller.stop_run()
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -1209,6 +1873,18 @@ class BookUIHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def _send_static(self, file_path: str, content_type: str) -> None:
+        if not os.path.exists(file_path):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        with open(file_path, "rb") as handle:
+            payload = handle.read()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _send_state(self) -> None:
         snapshot = controller.get_snapshot()
@@ -1250,15 +1926,22 @@ def _snapshot_payload(snapshot):
         mode_label = "Pausing after the current chapter step"
     else:
         mode_label = "Keep Going" if snapshot.mode == "keep_going" else "Ask for Advice"
+    banner = _context_banner(snapshot)
     return {
             "status": snapshot.status,
+            "status_display": _status_display(snapshot.status),
+            "status_tone": _status_tone(snapshot),
             "phase": snapshot.phase,
+            "phase_area": _phase_area(snapshot),
             "mode": snapshot.mode,
             "mode_label": mode_label,
+            "mode_display": _mode_display(snapshot),
             "run_active": snapshot.run_active,
             "busy": snapshot.busy,
             "stop_requested": snapshot.stop_requested,
             "waiting_for_input": snapshot.waiting_for_input,
+            "project_name": _project_name(snapshot),
+            "banner": banner,
             "resume_available": snapshot.resume_available,
             "resume_chapter_number": snapshot.resume_chapter_number,
             "current_chapter": snapshot.current_chapter,
@@ -1298,6 +1981,7 @@ def _snapshot_payload(snapshot):
                     "title": chapter.title,
                     "status": chapter.status,
                     "saved_text": snapshot.chapter_reviews.get(chapter.number).saved_text if snapshot.chapter_reviews.get(chapter.number) else "",
+                    "artifacts_text": _render_artifacts(snapshot.chapter_reviews.get(chapter.number)),
                 }
                 for chapter in snapshot.chapters
             ],
@@ -1365,15 +2049,17 @@ def _render_chapter_details_inputs(num_chapters: int, chapter_details: Dict[int,
     return "".join(items)
 
 
-def _render_chapter_item(number: int, title: str, status: str) -> str:
-    full_title = f"Chapter {number}: {title}"
-    if status == "completed":
-        rendered = f"<strong>{escape(full_title)}</strong>"
-    elif status == "pending":
-        rendered = f"<em>{escape(full_title)}</em>"
-    else:
-        rendered = escape(full_title)
-    return f'<li class="chapter {escape(status)}"><span class="chapter-title">{rendered}</span></li>'
+def _render_chapter_item(number: int, title: str, status: str, selected: bool = False) -> str:
+    status_label = _status_display(status)
+    selected_class = " selected" if selected else ""
+    return (
+        f'<li class="chapter {escape(status)}{selected_class}" data-chapter="{number}">'
+        f'<button type="button" class="chapter-toggle" data-chapter="{number}">'
+        f'<span class="chapter-kicker">Chapter {number}</span>'
+        f'<span class="chapter-title">{escape(title)}</span>'
+        f'<span class="chapter-meta">{escape(status_label)}</span>'
+        f"</button></li>"
+    )
 
 
 def _render_continuity(snapshot) -> str:
