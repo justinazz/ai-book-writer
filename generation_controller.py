@@ -988,6 +988,14 @@ class GenerationController:
             if self._state.awaiting_outline_approval:
                 return
             if self._thread and self._thread.is_alive():
+                if self._state.stop_requested:
+                    self._state.stop_requested = False
+                    self._state.status = "running"
+                    self._state.busy = True
+                    if self._state.current_chapter:
+                        self._state.phase = f"Generating chapter {self._state.current_chapter}"
+                    self._state.phase_version += 1
+                    self._append_event(f"{_utc_timestamp()} - Pause request canceled")
                 self._resume_requested = True
                 self._state.waiting_for_input = False
                 self._append_event(f"{_utc_timestamp()} - Continue requested")
@@ -1015,6 +1023,8 @@ class GenerationController:
 
     def stop_run(self) -> None:
         with self._condition:
+            if self._state.stop_requested:
+                return
             self._state.stop_requested = True
             self._state.waiting_for_input = False
             self._state.phase = "Pausing after the current chapter step"

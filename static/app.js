@@ -8,9 +8,13 @@
   let activeModalSourceId = "";
   let forceNextFormSync = false;
   let lastRenderedChapterDetailSignature = "";
-  let selectedChapterNumber = Number(initialState.current_chapter || 0);
+  const initialReaderTarget = defaultReaderTargetFor(initialState);
+  let selectedReaderView = initialReaderTarget.view;
+  let selectedChapterNumber = initialReaderTarget.chapterNumber;
   let activeTab = "";
   let manualTabSelection = false;
+  let manualReaderSelection = false;
+  let waitingReminderTimer = null;
   const dirtyFields = new Set();
 
   function byId(id) {
@@ -37,7 +41,8 @@
   function outlineStatusSummary(state) {
     if (state.outline_approved) return "Approved";
     if (state.awaiting_outline_approval) return "Awaiting review";
-    return "Not approved yet";
+    if (state.outline_text) return "Draft ready";
+    return "Not generated";
   }
 
   function completionSignalFor(state) {
@@ -56,6 +61,44 @@
     if (state.phase_area) return String(state.phase_area).toLowerCase();
     if (state.current_chapter > 0 || state.outline_approved || state.resume_available) return "writing";
     return "planning";
+  }
+
+  function defaultReaderTargetFor(state) {
+    const chapters = state?.chapters || [];
+    const current = chapters.find((chapter) => chapter.number === Number(state?.current_chapter || 0));
+    if (current) {
+      return { view: "chapter", chapterNumber: current.number };
+    }
+    const firstWithText = chapters.find((chapter) => chapter.saved_text);
+    if (firstWithText) {
+      return { view: "chapter", chapterNumber: firstWithText.number };
+    }
+    if (state?.outline_text) {
+      return { view: "outline", chapterNumber: 0 };
+    }
+    if (chapters.length) {
+      return { view: "chapter", chapterNumber: chapters[0].number };
+    }
+    return { view: "outline", chapterNumber: 0 };
+  }
+
+  function livePhaseState(state) {
+    if (state.latest_error || state.status === "failed") {
+      return { tone: "error", label: "Error" };
+    }
+    if (state.waiting_for_input || state.awaiting_outline_approval || state.status === "waiting") {
+      return { tone: "waiting", label: "Waiting" };
+    }
+    if (state.stop_requested && state.run_active) {
+      return { tone: "idle", label: "Pause pending" };
+    }
+    if (state.run_active) {
+      return { tone: "generating", label: "Generating" };
+    }
+    if (state.resume_available || state.status === "stopped") {
+      return { tone: "idle", label: "Paused" };
+    }
+    return { tone: "idle", label: "Idle" };
   }
 
   function setActiveTab(name, userInitiated = false) {
@@ -151,6 +194,68 @@
     }
   }
 
+  function playReminderCue() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const now = ctx.currentTime;
+      [430, 640, 520].forEach((freq, index) => {
+        const oscillator = ctx.createOscillator();
+        const gain = ctx.createGain();
+        oscillator.type = "square";
+        oscillator.frequency.setValueAtTime(freq, now + index * 0.22);
+        gain.gain.setValueAtTime(0.0001, now + index * 0.22);
+        gain.gain.exponentialRampToValueAtTime(0.09, now + index * 0.22 + 0.03);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + index * 0.22 + 0.24);
+        oscillator.connect(gain);
+        gain.connect(ctx.destination);
+        oscillator.start(now + index * 0.22);
+        oscillator.stop(now + index * 0.22 + 0.24);
+      });
+    } catch (_error) {
+    }
+  }
+
+  function speakAnnouncement(text) {
+    if (!text || !("speechSynthesis" in window)) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 1;
+      utterance.pitch = 0.95;
+      utterance.volume = 1;
+      window.speechSynthesis.speak(utterance);
+    } catch (_error) {
+    }
+  }
+
+  function completionAnnouncementText(state) {
+    const title = String(state.current_checkpoint_title || "").trim();
+    if (/^Outline ready for review$/i.test(title)) return "Outline generated";
+    const chapterMatch = title.match(/^Chapter\s+(\d+)\s+(complete|regenerated)$/i);
+    if (chapterMatch) return `Chapter ${chapterMatch[1]} generated`;
+    if (state.phase === "Generation complete") return "Book generation complete";
+    return "";
+  }
+
+  function syncWaitingReminder(state) {
+    const shouldRemind = Boolean(state.waiting_for_input && (state.run_active || state.awaiting_outline_approval));
+    if (!shouldRemind) {
+      if (waitingReminderTimer) {
+        window.clearInterval(waitingReminderTimer);
+        waitingReminderTimer = null;
+      }
+      return;
+    }
+    if (!waitingReminderTimer) {
+      waitingReminderTimer = window.setInterval(() => {
+        const current = lastKnownState || {};
+        if (current.waiting_for_input && (current.run_active || current.awaiting_outline_approval)) {
+          playReminderCue();
+        }
+      }, 5 * 60 * 1000);
+    }
+  }
+
   function flashPhase() {
     const banner = byId("context-banner");
     if (!banner) return;
@@ -193,17 +298,24 @@
 
   function ensureTextareaExpandButtons(root = document) {
     root.querySelectorAll("textarea").forEach((textarea) => {
-      if (textarea.id === "textarea-modal-input" || textarea.dataset.expandBound === "true") return;
+      if (textarea.id === "textarea-modal-input") return;
+      let shell = textarea.parentElement;
+      if (!shell || !shell.classList.contains("textarea-shell")) {
+        shell = document.createElement("div");
+        shell.className = "textarea-shell";
+        textarea.parentNode.insertBefore(shell, textarea);
+        shell.appendChild(textarea);
+      }
+      if (textarea.dataset.expandBound === "true") return;
       textarea.dataset.expandBound = "true";
-      const toolbar = document.createElement("div");
-      toolbar.className = "textarea-toolbar";
       const button = document.createElement("button");
       button.type = "button";
       button.className = "secondary expand-textarea-button";
-      button.innerHTML = "&#8599; Expand";
+      button.innerHTML = "&#8599;";
+      button.setAttribute("aria-label", "Expand editor");
+      button.title = "Expand editor";
       button.addEventListener("click", () => openTextareaModal(textarea));
-      toolbar.appendChild(button);
-      textarea.insertAdjacentElement("afterend", toolbar);
+      shell.appendChild(button);
     });
   }
 
@@ -275,10 +387,19 @@
     let html = "";
     for (let chapter = 1; chapter <= total; chapter += 1) {
       const detail = normalizedDetails[chapter];
-      html += `<label class="label" for="chapter_detail_beats_${chapter}">Chapter ${chapter} Details</label>`;
+      html += `<div class="chapter-detail-group" data-chapter-group="${chapter}">`;
+      html += `<div class="chapter-detail-group__heading">Chapter ${chapter}</div>`;
+      html += `<div class="chapter-detail-group__fields">`;
+      html += `<div class="chapter-detail-group__field chapter-detail-group__field--text">`;
+      html += `<label class="label" for="chapter_detail_beats_${chapter}">Chapter Details</label>`;
       html += `<textarea id="chapter_detail_beats_${chapter}" name="chapter_detail_beats_${chapter}" class="chapter-detail-beats-input" data-chapter="${chapter}" placeholder="Required beats for Chapter ${chapter}.">${escapeHtml(detail.beats || "")}</textarea>`;
-      html += `<label class="label" for="chapter_detail_wordcount_${chapter}">Chapter ${chapter} Target Word Count</label>`;
+      html += `</div>`;
+      html += `<div class="chapter-detail-group__field chapter-detail-group__field--compact">`;
+      html += `<label class="label" for="chapter_detail_wordcount_${chapter}">Target Word Count</label>`;
       html += `<input id="chapter_detail_wordcount_${chapter}" name="chapter_detail_wordcount_${chapter}" type="number" min="0" max="50000" class="chapter-detail-wordcount-input" data-chapter="${chapter}" value="${Number(detail.target_word_count || 0)}">`;
+      html += `</div>`;
+      html += `</div>`;
+      html += `</div>`;
     }
     container.innerHTML = html;
     lastRenderedChapterDetailSignature = signature;
@@ -330,17 +451,40 @@
     return nextChoice;
   }
 
+  function ensureSelectedReader(state) {
+    if (selectedReaderView === "outline") {
+      return { view: "outline", chapter: null };
+    }
+    const chapter = ensureSelectedChapter(state);
+    if (chapter) {
+      return { view: "chapter", chapter };
+    }
+    selectedReaderView = "outline";
+    return { view: "outline", chapter: null };
+  }
+
   function chapterHtml(chapter) {
     const status = chapter.status || "pending";
-    const selected = Number(chapter.number) === Number(selectedChapterNumber) ? " selected" : "";
+    const selected = selectedReaderView === "chapter" && Number(chapter.number) === Number(selectedChapterNumber) ? " selected" : "";
     return `<li class="chapter ${escapeHtml(status)}${selected}" data-chapter="${chapter.number}"><button type="button" class="chapter-toggle" data-chapter="${chapter.number}"><span class="chapter-kicker">Chapter ${chapter.number}</span><span class="chapter-title">${escapeHtml(chapter.title || `Chapter ${chapter.number}`)}</span><span class="chapter-meta">${escapeHtml(statusLabel(status))}</span></button></li>`;
+  }
+
+  function outlineNavHtml(state) {
+    const selected = selectedReaderView === "outline" ? " selected" : "";
+    return `<li class="chapter chapter--outline${selected}" data-view="outline"><button type="button" class="chapter-toggle chapter-toggle--outline" data-view="outline"><span class="chapter-kicker">Reference</span><span class="chapter-title">Outline</span><span class="chapter-meta">${escapeHtml(outlineStatusSummary(state))}</span></button></li>`;
   }
 
   function renderChapterList(state) {
     const list = byId("chapter-list");
     if (!list) return;
     const chapters = state.chapters || [];
-    list.innerHTML = chapters.length ? chapters.map(chapterHtml).join("") : `<li class="chapter chapter--placeholder"><span class="chapter-title">No chapters yet.</span></li>`;
+    const items = [outlineNavHtml(state)];
+    if (chapters.length) {
+      items.push(chapters.map(chapterHtml).join(""));
+    } else {
+      items.push(`<li class="chapter chapter--placeholder"><span class="chapter-title">No chapters yet.</span></li>`);
+    }
+    list.innerHTML = items.join("");
     bindChapterToggles();
   }
 
@@ -356,10 +500,29 @@
   }
 
   function renderSelectedChapter(state) {
-    const chapter = ensureSelectedChapter(state);
+    const reader = ensureSelectedReader(state);
+    if (reader.view === "outline") {
+      byId("selected-chapter-title").textContent = "Outline";
+      byId("selected-chapter-status").textContent = outlineStatusSummary(state);
+      byId("selected-chapter-content").textContent = state.outline_text || "Outline not generated yet.";
+      byId("chapter-artifacts").textContent = "Outline view does not have chapter artifacts.";
+      syncSelectedChapterInputs(0, state);
+      return;
+    }
+
+    const chapter = reader.chapter;
     const title = chapter ? `Chapter ${chapter.number}: ${chapter.title}` : "Chapter workspace";
     const status = chapter ? statusLabel(chapter.status) : "Not started";
-    const text = chapter?.saved_text || "Select a chapter from the left rail or start a run to read generated text here.";
+    let text = "Select a chapter from the left rail or start a run to read generated text here.";
+    if (chapter?.saved_text) {
+      text = chapter.saved_text;
+    } else if (chapter?.status === "in_progress") {
+      text = `Chapter ${chapter.number} is currently being generated. The latest completed text will appear here when the checkpoint finishes.`;
+    } else if (chapter?.status === "pending") {
+      text = `Chapter ${chapter.number} is pending and has not been generated yet.`;
+    } else if (chapter?.status === "failed") {
+      text = `Chapter ${chapter.number} failed on the last attempt. Check Errors & Events for details.`;
+    }
     const artifacts = chapter?.artifacts_text || "No chapter artifacts yet.";
     byId("selected-chapter-title").textContent = title;
     byId("selected-chapter-status").textContent = status;
@@ -371,7 +534,13 @@
   function bindChapterToggles() {
     document.querySelectorAll(".chapter-toggle").forEach((button) => {
       button.onclick = () => {
-        selectedChapterNumber = Number(button.dataset.chapter || "0");
+        manualReaderSelection = true;
+        if (button.dataset.view === "outline") {
+          selectedReaderView = "outline";
+        } else {
+          selectedReaderView = "chapter";
+          selectedChapterNumber = Number(button.dataset.chapter || "0");
+        }
         renderChapterList(lastKnownState);
         renderSelectedChapter(lastKnownState);
       };
@@ -391,6 +560,8 @@
   function applyState(state) {
     lastKnownState = state;
     const waitingText = state.waiting_for_input ? "Yes" : "No";
+    const completionAnnouncement = completionAnnouncementText(state);
+    const isCompletionCheckpoint = Boolean(completionAnnouncement);
     setBoundText("project-name", state.project_name || "Current Book Project");
     setBoundText("status-display", state.status_display || statusLabel(state.status));
     setBoundText("phase-area", state.phase_area || preferredTabForState(state));
@@ -402,11 +573,16 @@
     if (statusChip) {
       statusChip.className = `status-chip status-chip--${state.status_tone || "accent"}`;
     }
-    byId("phase-status").innerHTML = `<span id="live-spinner" class="spinner-shell ${state.busy ? "active" : ""}"><span class="spinner-dot"></span></span>${escapeHtml(state.phase || "Idle")}`;
+    byId("phase-status").textContent = state.phase || "Idle";
     renderContextBanner(state);
 
     if (!manualTabSelection) {
       setActiveTab(preferredTabForState(state));
+    }
+    if (!manualReaderSelection) {
+      const nextReaderTarget = defaultReaderTargetFor(state);
+      selectedReaderView = nextReaderTarget.view;
+      selectedChapterNumber = nextReaderTarget.chapterNumber;
     }
 
     setFieldValue("endpoint_url", state.endpoint_url || "");
@@ -462,9 +638,10 @@
     byId("start-button").innerHTML = `&#9889; ${state.resume_available && !state.run_active ? "Start New Run" : "Start Run"}`;
     byId("keep-going-button").disabled = !state.run_active || state.mode === "keep_going";
     byId("ask-advice-button").disabled = !state.run_active || state.mode === "ask_for_advice";
-    byId("continue-button").disabled = ((!state.run_active || !state.waiting_for_input) && !state.resume_available) || state.awaiting_outline_approval;
+    byId("continue-button").disabled = ((!state.run_active || (!state.waiting_for_input && !state.stop_requested)) && !state.resume_available) || state.awaiting_outline_approval;
     byId("continue-button").innerHTML = `&#9658; ${state.resume_available && !state.run_active ? "Resume Run" : "Continue"}`;
-    byId("stop-button").disabled = !state.run_active || state.status === "completed" || state.status === "failed";
+    byId("stop-button").disabled = !state.run_active || state.status === "completed" || state.status === "failed" || state.stop_requested;
+    byId("stop-button").innerHTML = `&#9208; ${state.stop_requested ? "Pause Pending" : "Pause"}`;
     byId("approve-outline-button").disabled = !state.awaiting_outline_approval;
     byId("regen-outline-button").disabled = !state.awaiting_outline_approval;
     byId("chapter-advice-button").disabled = !state.run_active && !state.resume_available;
@@ -473,20 +650,19 @@
     if (state.busy && state.progress?.current_agent && state.progress.current_agent !== "idle" && state.progress.current_agent !== lastAgent) {
       playSoftCue();
     }
-    if (state.waiting_for_input && !lastWaitingForInput) {
+    if (state.waiting_for_input && !lastWaitingForInput && !isCompletionCheckpoint) {
       playWaitingCue();
     }
     lastAgent = state.progress?.current_agent || "";
     lastWaitingForInput = Boolean(state.waiting_for_input);
+    syncWaitingReminder(state);
     if (state.phase_version !== lastPhaseVersion) {
       lastPhaseVersion = state.phase_version;
       flashPhase();
       const checkpointTitle = state.current_checkpoint_title || "";
-      const isCompletionCheckpoint = /^Chapter \d+ complete$/i.test(checkpointTitle) || /^Chapter \d+ regenerated$/i.test(checkpointTitle) || /^Outline ready for review$/i.test(checkpointTitle) || state.phase === "Generation complete";
       const completionSignal = completionSignalFor(state);
       if (isCompletionCheckpoint && completionSignal && completionSignal !== lastCompletionSignal) {
-        playWaitingCue();
-        playCompleteCue();
+        speakAnnouncement(completionAnnouncement);
       }
       if (isCompletionCheckpoint && completionSignal) {
         lastCompletionSignal = completionSignal;

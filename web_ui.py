@@ -73,6 +73,16 @@ def _status_display(status: str) -> str:
     return (status or "idle").replace("_", " ").strip().title() or "Idle"
 
 
+def _outline_status_text(snapshot) -> str:
+    if snapshot.outline_approved:
+        return "Approved"
+    if snapshot.awaiting_outline_approval:
+        return "Awaiting review"
+    if snapshot.outline_text:
+        return "Draft ready"
+    return "Not generated"
+
+
 def _phase_area(snapshot) -> str:
     phase = (snapshot.phase or "").lower()
     if snapshot.awaiting_outline_approval:
@@ -87,13 +97,25 @@ def _phase_area(snapshot) -> str:
 def _status_tone(snapshot) -> str:
     if snapshot.latest_error or snapshot.status == "failed":
         return "error"
-    if snapshot.status == "completed":
-        return "success"
-    if snapshot.waiting_for_input or snapshot.status == "stopped":
+    if snapshot.waiting_for_input or snapshot.awaiting_outline_approval or snapshot.status == "waiting":
         return "warning"
+    if snapshot.run_active and not snapshot.stop_requested:
+        return "success"
+    return "idle"
+
+
+def _live_phase_indicator(snapshot) -> Dict[str, str]:
+    if snapshot.latest_error or snapshot.status == "failed":
+        return {"tone": "error", "label": "Error"}
+    if snapshot.waiting_for_input or snapshot.awaiting_outline_approval or snapshot.status == "waiting":
+        return {"tone": "waiting", "label": "Waiting"}
+    if snapshot.stop_requested and snapshot.run_active:
+        return {"tone": "idle", "label": "Pause pending"}
     if snapshot.run_active:
-        return "running"
-    return "accent"
+        return {"tone": "generating", "label": "Generating"}
+    if snapshot.resume_available or snapshot.status == "stopped":
+        return {"tone": "idle", "label": "Paused"}
+    return {"tone": "idle", "label": "Idle"}
 
 
 def _context_banner(snapshot) -> Dict[str, str]:
@@ -162,6 +184,18 @@ def _selected_chapter_number(snapshot) -> int:
         if review and review.saved_text:
             return chapter.number
     return snapshot.chapters[0].number if snapshot.chapters else 0
+
+
+def _default_reader_view(snapshot) -> str:
+    if snapshot.current_chapter:
+        return "chapter"
+    for chapter in snapshot.chapters:
+        review = snapshot.chapter_reviews.get(chapter.number)
+        if review and review.saved_text:
+            return "chapter"
+    if snapshot.outline_text:
+        return "outline"
+    return "chapter" if snapshot.chapters else "outline"
 
 
 def _render_page() -> bytes:
@@ -584,18 +618,14 @@ def _render_page() -> bytes:
 
         <h2 style="margin-top: 18px;">Outline Approval</h2>
         <div class="card"><pre id="outline-approval-status">Approved: {"Yes" if snapshot.outline_approved else "No"} | Awaiting approval: {"Yes" if snapshot.awaiting_outline_approval else "No"}</pre></div>
-        <form method="post" action="/outline-feedback" class="async-form">
+        <form method="post" action="/approve-outline" class="async-form">
           <label class="label" for="outline_feedback">Outline Feedback</label>
           <textarea id="outline_feedback" name="outline_feedback" placeholder="Ask for pacing changes, stronger arcs, better chapter titles, more detail, or structural fixes.">{escape(outline_feedback)}</textarea>
-          <div class="controls">
-            <button class="secondary">&#9998; Save Feedback</button>
-          </div>
-        </form>
-        <form method="post" action="/approve-outline" class="async-form">
           <div class="controls">
             <button id="approve-outline-button" {"disabled" if not snapshot.awaiting_outline_approval else ""}>&#10003; Approve Outline</button>
             <button id="regen-outline-button" formaction="/regenerate-outline" class="secondary" {"disabled" if not snapshot.awaiting_outline_approval else ""}>&#8635; Regenerate Outline</button>
           </div>
+          <br />
         </form>
 
         <h2 style="margin-top: 18px;">Chapter Advice</h2>
@@ -1217,29 +1247,32 @@ def _prepare_page_context(snapshot) -> Dict[str, object]:
     elif snapshot.stop_requested and snapshot.run_active:
         mode_label = "Pausing after the current chapter step"
     else:
-        mode_label = "Keep Going" if snapshot.mode == "keep_going" else "Ask for Advice"
+        mode_label = "Auto" if snapshot.mode == "keep_going" else "Guided"
 
     waiting = "Yes" if snapshot.waiting_for_input else "No"
     can_start = not snapshot.run_active
     can_control = snapshot.run_active
     can_queue_chapter_advice = snapshot.run_active or snapshot.resume_available
     can_continue = (
-        (snapshot.run_active and snapshot.waiting_for_input and not snapshot.awaiting_outline_approval)
+        (snapshot.run_active and (snapshot.waiting_for_input or snapshot.stop_requested) and not snapshot.awaiting_outline_approval)
         or (snapshot.resume_available and not snapshot.awaiting_outline_approval)
     )
     phase_area = _phase_area(snapshot)
     status_display = _status_display(snapshot.status)
     mode_display = _mode_display(snapshot)
     banner = _context_banner(snapshot)
-    outline_status_text = (
-        "Approved"
-        if snapshot.outline_approved
-        else ("Awaiting review" if snapshot.awaiting_outline_approval else "Not approved yet")
-    )
+    outline_status_text = _outline_status_text(snapshot)
+    live_phase = _live_phase_indicator(snapshot)
     selected_number = _selected_chapter_number(snapshot)
-    selected_chapter = next((chapter for chapter in snapshot.chapters if chapter.number == selected_number), None)
-    selected_review = snapshot.chapter_reviews.get(selected_number)
-    chapter_items = (
+    selected_reader_view = _default_reader_view(snapshot)
+    selected_chapter = (
+        next((chapter for chapter in snapshot.chapters if chapter.number == selected_number), None)
+        if selected_reader_view == "chapter"
+        else None
+    )
+    selected_review = snapshot.chapter_reviews.get(selected_number) if selected_reader_view == "chapter" else None
+    chapter_items = _render_outline_item(snapshot, selected_reader_view == "outline")
+    chapter_items += (
         "".join(
             _render_chapter_item(chapter.number, chapter.title, chapter.status, chapter.number == selected_number)
             for chapter in snapshot.chapters
@@ -1260,22 +1293,41 @@ def _prepare_page_context(snapshot) -> Dict[str, object]:
         "status_display": status_display,
         "status_tone": _status_tone(snapshot),
         "mode_display": mode_display,
+        "live_phase_tone": live_phase["tone"],
+        "live_phase_label": live_phase["label"],
         "project_name": _project_name(snapshot),
         "banner": banner,
         "outline_status_text": outline_status_text,
         "selected_chapter_number": selected_number,
+        "selected_reader_view": selected_reader_view,
         "selected_chapter_title": (
-            f"Chapter {selected_chapter.number}: {selected_chapter.title}"
-            if selected_chapter
-            else "Chapter workspace"
+            "Outline"
+            if selected_reader_view == "outline"
+            else (
+                f"Chapter {selected_chapter.number}: {selected_chapter.title}"
+                if selected_chapter
+                else "Chapter workspace"
+            )
         ),
-        "selected_chapter_status": _status_display(selected_chapter.status) if selected_chapter else "Not started",
+        "selected_chapter_status": (
+            outline_status_text
+            if selected_reader_view == "outline"
+            else (_status_display(selected_chapter.status) if selected_chapter else "Not started")
+        ),
         "selected_chapter_text": (
-            selected_review.saved_text
-            if selected_review and selected_review.saved_text
-            else "Select a chapter from the left rail or start a run to read generated text here."
+            (snapshot.outline_text or "Outline not generated yet.")
+            if selected_reader_view == "outline"
+            else (
+                selected_review.saved_text
+                if selected_review and selected_review.saved_text
+                else "Select a chapter from the left rail or start a run to read generated text here."
+            )
         ),
-        "selected_artifacts": _render_artifacts(selected_review),
+        "selected_artifacts": (
+            "Outline view does not have chapter artifacts."
+            if selected_reader_view == "outline"
+            else _render_artifacts(selected_review)
+        ),
         "chapter_items": chapter_items,
         "outline_text": snapshot.outline_text or "Outline not generated yet.",
         "checkpoint_body": snapshot.current_checkpoint_body or "Nothing to review yet.",
@@ -1305,15 +1357,16 @@ def _render_topbar(context: Dict[str, object]) -> str:
           <h1 data-bind="project-name">{escape(str(context["project_name"]))}</h1>
         </div>
         <div class="status-cluster">
-          <span class="status-chip status-chip--{escape(str(context["status_tone"]))}" id="overall-status-chip" data-bind="status-display">{escape(str(context["status_display"]))}</span>
-          <span class="status-chip status-chip--muted" data-bind="phase-area">{escape(str(context["phase_area"]))}</span>
-          <span class="status-chip status-chip--muted" data-bind="mode-display">{escape(str(context["mode_display"]))}</span>
+          <span class="status-chip status-chip--{escape(str(context["status_tone"]))}" id="overall-status-chip">
+            <span class="phase-indicator__dot status-chip__dot"></span>
+            <span id="overall-status-text" data-bind="status-display">{escape(str(context["status_display"]))}</span>
+          </span>
         </div>
       </div>
       <div class="app-topbar__metrics">
         <div class="metric-card">
           <span class="metric-label">Live phase</span>
-          <div class="metric-value status-line" id="phase-status"><span id="live-spinner" class="spinner-shell{' active' if snapshot.busy else ''}"><span class="spinner-dot"></span></span>{escape(snapshot.phase or "Idle")}</div>
+          <div class="metric-value phase-status__text" id="phase-status">{escape(snapshot.phase or "Idle")}</div>
         </div>
         <div class="metric-card">
           <span class="metric-label">Current chapter</span>
@@ -1325,21 +1378,25 @@ def _render_topbar(context: Dict[str, object]) -> str:
         </div>
       </div>
       <div class="app-topbar__controls">
-        <button id="start-button" type="submit" form="run-setup-form" {"disabled" if not context["can_start"] else ""}>&#9889; {escape(start_label)}</button>
-        <form method="post" action="/mode" class="async-form inline-form">
-          <input type="hidden" name="mode" value="keep_going">
-          <button id="keep-going-button" class="secondary" {"disabled" if not context["can_control"] else ""}>Auto</button>
-        </form>
-        <form method="post" action="/mode" class="async-form inline-form">
-          <input type="hidden" name="mode" value="ask_for_advice">
-          <button id="ask-advice-button" class="secondary" {"disabled" if not context["can_control"] else ""}>Guided</button>
-        </form>
-        <form method="post" action="/continue" class="async-form inline-form">
-          <button id="continue-button" {"disabled" if not context["can_continue"] else ""}>&#9658; {escape(continue_label)}</button>
-        </form>
-        <form method="post" action="/stop" class="async-form inline-form">
-          <button id="stop-button" class="danger" {"disabled" if not context["can_control"] else ""}>&#9208; Pause</button>
-        </form>
+        <div class="control-row">
+          <button id="start-button" type="submit" form="run-setup-form" {"disabled" if not context["can_start"] else ""}>&#9889; {escape(start_label)}</button>
+          <form method="post" action="/mode" class="async-form inline-form">
+            <input type="hidden" name="mode" value="keep_going">
+            <button id="keep-going-button" class="secondary" {"disabled" if not context["can_control"] else ""}>Auto</button>
+          </form>
+          <form method="post" action="/mode" class="async-form inline-form">
+            <input type="hidden" name="mode" value="ask_for_advice">
+            <button id="ask-advice-button" class="secondary" {"disabled" if not context["can_control"] else ""}>Guided</button>
+          </form>
+        </div>
+        <div class="control-row control-row--secondary">
+          <form method="post" action="/continue" class="async-form inline-form">
+            <button id="continue-button" {"disabled" if not context["can_continue"] else ""}>&#9658; {escape(continue_label)}</button>
+          </form>
+          <form method="post" action="/stop" class="async-form inline-form">
+            <button id="stop-button" class="danger" {"disabled" if not context["can_control"] else ""}>&#9208; Pause</button>
+          </form>
+        </div>
       </div>
     </header>
     """
@@ -1530,18 +1587,14 @@ def _render_planning_tab(context: Dict[str, object]) -> str:
                 <span class="status-chip status-chip--muted" data-bind="outline-status-summary">{escape(str(context["outline_status_text"]))}</span>
               </div>
               <div class="inline-note" id="outline-approval-status">Approved: {"Yes" if snapshot.outline_approved else "No"} | Awaiting approval: {"Yes" if snapshot.awaiting_outline_approval else "No"}</div>
-              <form method="post" action="/outline-feedback" class="async-form">
+              <form method="post" action="/approve-outline" class="async-form">
                 <label class="label" for="outline_feedback">Outline Feedback</label>
                 <textarea id="outline_feedback" name="outline_feedback" placeholder="Ask for pacing changes, stronger arcs, better chapter titles, more detail, or structural fixes.">{escape(str(context["outline_feedback"]))}</textarea>
-                <div class="controls">
-                  <button class="secondary">&#9998; Save Feedback</button>
-                </div>
-              </form>
-              <form method="post" action="/approve-outline" class="async-form">
                 <div class="controls">
                   <button id="approve-outline-button" {"disabled" if not snapshot.awaiting_outline_approval else ""}>&#10003; Approve Outline</button>
                   <button id="regen-outline-button" formaction="/regenerate-outline" class="secondary" {"disabled" if not snapshot.awaiting_outline_approval else ""}>&#8635; Regenerate Outline</button>
                 </div>
+                  <br />
               </form>
               <div class="subheading">Generated outline</div>
               <pre id="outline-text" class="longform-view">{escape(str(context["outline_text"]))}</pre>
@@ -1553,18 +1606,18 @@ def _render_planning_tab(context: Dict[str, object]) -> str:
               <form method="post" action="/save-config" class="async-form">
                 <label class="label" for="config_name">Save Current Setup</label>
                 <input id="config_name" type="text" name="config_name" placeholder="Example: Dane thriller v1" value="{escape(str(context["config_name"]))}">
-                <div class="controls">
+                <div class="controls controls--stack">
                   <button class="secondary">&#128190; Save Config</button>
                 </div>
               </form>
               <form method="post" action="/load-config" class="async-form">
                 <label class="label" for="config_file">Load Saved Setup</label>
                 <select id="config_file" name="config_file">{context["saved_configs"]}</select>
-                <div class="controls">
+                <div class="controls controls--stack">
                   <button class="secondary">&#128194; Load Config</button>
                 </div>
               </form>
-              <div class="controls">
+              <div class="controls controls--stack">
                 <button id="external-config-button" class="secondary" type="button">&#128194; Load External Config</button>
                 <button id="save-external-config-button" class="secondary" type="button">&#128190; Save External Config</button>
                 <input id="external-config-input" type="file" accept=".json,application/json" style="display:none;">
@@ -1590,7 +1643,7 @@ def _render_writing_tab(context: Dict[str, object]) -> str:
           <aside class="chapter-sidebar">
             <section class="workspace-card sticky-card">
               <div class="eyebrow">Writing</div>
-              <h2>Chapters</h2>
+              <h2>Outline &amp; Chapters</h2>
               <ul class="chapter-list" id="chapter-list">
                 {context["chapter_items"]}
               </ul>
@@ -1598,12 +1651,6 @@ def _render_writing_tab(context: Dict[str, object]) -> str:
           </aside>
 
           <div class="writing-main">
-            <section class="workspace-card phase-box" id="checkpoint-box">
-              <div class="eyebrow">Checkpoint</div>
-              <h2 id="checkpoint-title">{escape(snapshot.current_checkpoint_title or "Waiting for the first checkpoint.")}</h2>
-              <pre id="checkpoint-body">{escape(str(context["checkpoint_body"]))}</pre>
-            </section>
-
             <section class="workspace-card chapter-reader-card">
               <div class="section-heading">
                 <div>
@@ -1616,6 +1663,12 @@ def _render_writing_tab(context: Dict[str, object]) -> str:
             </section>
           </div>
 
+          <section class="workspace-card phase-box" id="checkpoint-box">
+            <div class="eyebrow">Checkpoint</div>
+            <h2 id="checkpoint-title">{escape(snapshot.current_checkpoint_title or "Waiting for the first checkpoint.")}</h2>
+            <pre id="checkpoint-body">{escape(str(context["checkpoint_body"]))}</pre>
+          </section>
+
           <aside class="writing-rail">
             <section class="workspace-card">
               <div class="eyebrow">Intervention</div>
@@ -1627,19 +1680,25 @@ def _render_writing_tab(context: Dict[str, object]) -> str:
                 <textarea class="advice-box" id="advice" name="advice" placeholder="Example: 1. He stalls at the threshold. 2. She notices the blood on his cuff. 3. Their argument expands into the hidden ledger reveal."></textarea>
                 <label class="label" for="chapter_advice_target_word_count">Optional replacement target word count</label>
                 <input id="chapter_advice_target_word_count" type="number" min="0" max="50000" name="target_word_count" value="">
-                <div class="controls">
+                <div class="controls chapter-action">
                   <button id="chapter-advice-button" {"disabled" if not context["can_queue_chapter_advice"] else ""}>&#10148; Queue Chapter Advice</button>
                 </div>
               </form>
               <form method="post" action="/regenerate-chapter" class="async-form">
                 <label class="label" for="regen_chapter_number">Regenerate Chapter</label>
                 <input id="regen_chapter_number" type="number" min="1" max="{snapshot.total_chapters or snapshot.num_chapters or 1}" name="chapter_number" value="{context["selected_chapter_number"] or snapshot.current_chapter or 1}">
-                <div class="controls">
-                  <button id="regen-chapter-button" {"disabled" if snapshot.run_active else ""}>&#8635; Regenerate Chapter</button>
+                <div class="controls chapter-action">
+                  <button id="regen-chapter-button" {"disabled" if snapshot.run_active or not snapshot.outline_approved else ""}>&#8635; Regenerate Chapter</button>
                 </div>
               </form>
               <div class="subheading">Last queued advice</div>
               <pre id="last-advice">{escape(snapshot.latest_advice or "No advice submitted yet.")}</pre>
+            </section>
+
+            <section class="workspace-card">
+              <div class="eyebrow">Inspector</div>
+              <h2>Continuity</h2>
+              <pre id="continuity-panel">{escape(str(context["continuity_text"]))}</pre>
             </section>
 
             <section class="workspace-card">
@@ -1661,12 +1720,6 @@ def _render_writing_tab(context: Dict[str, object]) -> str:
               <div class="eyebrow">Inspector</div>
               <h2>Chapter Artifacts</h2>
               <pre id="chapter-artifacts">{escape(str(context["selected_artifacts"]))}</pre>
-            </section>
-
-            <section class="workspace-card">
-              <div class="eyebrow">Inspector</div>
-              <h2>Continuity</h2>
-              <pre id="continuity-panel">{escape(str(context["continuity_text"]))}</pre>
             </section>
 
             <section class="workspace-card">
@@ -1925,14 +1978,17 @@ def _snapshot_payload(snapshot):
     elif snapshot.stop_requested and snapshot.run_active:
         mode_label = "Pausing after the current chapter step"
     else:
-        mode_label = "Keep Going" if snapshot.mode == "keep_going" else "Ask for Advice"
+        mode_label = "Auto" if snapshot.mode == "keep_going" else "Guided"
     banner = _context_banner(snapshot)
+    live_phase = _live_phase_indicator(snapshot)
     return {
             "status": snapshot.status,
             "status_display": _status_display(snapshot.status),
             "status_tone": _status_tone(snapshot),
             "phase": snapshot.phase,
             "phase_area": _phase_area(snapshot),
+            "live_phase_tone": live_phase["tone"],
+            "live_phase_label": live_phase["label"],
             "mode": snapshot.mode,
             "mode_label": mode_label,
             "mode_display": _mode_display(snapshot),
@@ -2040,10 +2096,19 @@ def _render_chapter_details_inputs(num_chapters: int, chapter_details: Dict[int,
         target_word_count = details.get("target_word_count", 0) if isinstance(details, dict) else 0
         items.append(
             f"""
-            <label class="label" for="chapter_detail_beats_{chapter_number}">Chapter {chapter_number} Details</label>
-            <textarea id="chapter_detail_beats_{chapter_number}" name="chapter_detail_beats_{chapter_number}" class="chapter-detail-beats-input" data-chapter="{chapter_number}" placeholder="Required beats for Chapter {chapter_number}.">{escape(str(beats or ""))}</textarea>
-            <label class="label" for="chapter_detail_wordcount_{chapter_number}">Chapter {chapter_number} Target Word Count</label>
-            <input id="chapter_detail_wordcount_{chapter_number}" name="chapter_detail_wordcount_{chapter_number}" type="number" min="0" max="50000" class="chapter-detail-wordcount-input" data-chapter="{chapter_number}" value="{int(target_word_count or 0)}">
+            <div class="chapter-detail-group" data-chapter-group="{chapter_number}">
+              <div class="chapter-detail-group__heading">Chapter {chapter_number}</div>
+              <div class="chapter-detail-group__fields">
+                <div class="chapter-detail-group__field chapter-detail-group__field--text">
+                  <label class="label" for="chapter_detail_beats_{chapter_number}">Chapter Details</label>
+                  <textarea id="chapter_detail_beats_{chapter_number}" name="chapter_detail_beats_{chapter_number}" class="chapter-detail-beats-input" data-chapter="{chapter_number}" placeholder="Required beats for Chapter {chapter_number}.">{escape(str(beats or ""))}</textarea>
+                </div>
+                <div class="chapter-detail-group__field chapter-detail-group__field--compact">
+                  <label class="label" for="chapter_detail_wordcount_{chapter_number}">Target Word Count</label>
+                  <input id="chapter_detail_wordcount_{chapter_number}" name="chapter_detail_wordcount_{chapter_number}" type="number" min="0" max="50000" class="chapter-detail-wordcount-input" data-chapter="{chapter_number}" value="{int(target_word_count or 0)}">
+                </div>
+              </div>
+            </div>
             """
         )
     return "".join(items)
@@ -2058,6 +2123,18 @@ def _render_chapter_item(number: int, title: str, status: str, selected: bool = 
         f'<span class="chapter-kicker">Chapter {number}</span>'
         f'<span class="chapter-title">{escape(title)}</span>'
         f'<span class="chapter-meta">{escape(status_label)}</span>'
+        f"</button></li>"
+    )
+
+
+def _render_outline_item(snapshot, selected: bool = False) -> str:
+    selected_class = " selected" if selected else ""
+    return (
+        f'<li class="chapter chapter--outline{selected_class}" data-view="outline">'
+        f'<button type="button" class="chapter-toggle chapter-toggle--outline" data-view="outline">'
+        f'<span class="chapter-kicker">Reference</span>'
+        f'<span class="chapter-title">Outline</span>'
+        f'<span class="chapter-meta">{escape(_outline_status_text(snapshot))}</span>'
         f"</button></li>"
     )
 
@@ -2090,7 +2167,7 @@ def _render_artifacts(review) -> str:
     ])
 
 
-def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
+def serve(host: str = "127.0.0.1", port: int = 8001) -> None:
     server = ThreadingHTTPServer((host, port), BookUIHandler)
     controller._log_runtime(f"Book Writer UI running at http://{host}:{port}")
     controller._log_runtime("Open the URL in your browser and control generation from there.")
