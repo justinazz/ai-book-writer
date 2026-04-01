@@ -1305,6 +1305,23 @@ class BookGenerator:
             ]
         )
 
+    def _is_retryable_model_load_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in [
+                "failed to load model",
+                "error loading model",
+                "internal server error",
+                "server had an error",
+                "temporarily unavailable",
+                "connection reset",
+                "connection aborted",
+                "connection refused",
+                "timed out",
+            ]
+        )
+
     def _extract_last_content(self, chat_history: List[Dict]) -> str:
         for msg in reversed(chat_history):
             content = (msg.get("content") or "").strip()
@@ -1341,13 +1358,27 @@ class BookGenerator:
             f"CHAPTER {chapter_number} | ATTEMPT {attempt} | STEP {step_name} | INPUT | PROMPT | {agent.name}",
             prompt,
         )
-        chat_result = self.agents["user_proxy"].initiate_chat(
-            agent,
-            clear_history=True,
-            silent=True,
-            max_turns=1,
-            message=prompt,
-        )
+        retry_delays = (1.0, 3.0)
+        for retry_index in range(len(retry_delays) + 1):
+            try:
+                chat_result = self.agents["user_proxy"].initiate_chat(
+                    agent,
+                    clear_history=True,
+                    silent=True,
+                    max_turns=1,
+                    message=prompt,
+                )
+                break
+            except Exception as exc:
+                if retry_index >= len(retry_delays) or not self._is_retryable_model_load_error(exc):
+                    raise
+                delay = retry_delays[retry_index]
+                self._log(
+                    "[book_generator] Retryable model/provider failure during "
+                    f"{step_name} for chapter {chapter_number} via {agent.name}: {exc}. "
+                    f"Retrying in {delay:.1f}s."
+                )
+                time.sleep(delay)
         output = self._extract_last_content(chat_result.chat_history)
         self._log_block(
             f"CHAPTER {chapter_number} | ATTEMPT {attempt} | STEP {step_name} | OUTPUT | {agent.name}",

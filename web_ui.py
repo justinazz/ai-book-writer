@@ -137,7 +137,7 @@ def _context_banner(snapshot) -> Dict[str, str]:
         return {
             "level": "accent",
             "title": "A writing session is ready to resume",
-            "body": f"Open Writing to inspect the saved work, then press Continue to resume from {chapter_label}.",
+            "body": f"Open Writing to inspect the saved work, regenerate another chapter if needed, then press Continue to resume from {chapter_label}.",
         }
     if snapshot.waiting_for_input:
         if phase_area == "Planning":
@@ -149,7 +149,7 @@ def _context_banner(snapshot) -> Dict[str, str]:
         return {
             "level": "warning",
             "title": snapshot.current_checkpoint_title or "Waiting for guidance",
-            "body": "Use Writing to inspect the checkpoint, queue advice if needed, then continue.",
+            "body": "Use Writing to inspect the checkpoint, queue advice or regenerate a chapter if needed, then continue.",
         }
     if snapshot.run_active:
         return {
@@ -1253,6 +1253,11 @@ def _prepare_page_context(snapshot) -> Dict[str, object]:
     can_start = not snapshot.run_active
     can_control = snapshot.run_active
     can_queue_chapter_advice = snapshot.run_active or snapshot.resume_available
+    can_regenerate_chapter = (
+        snapshot.outline_approved
+        and not snapshot.awaiting_outline_approval
+        and (not snapshot.run_active or snapshot.waiting_for_input)
+    )
     can_continue = (
         (snapshot.run_active and (snapshot.waiting_for_input or snapshot.stop_requested) and not snapshot.awaiting_outline_approval)
         or (snapshot.resume_available and not snapshot.awaiting_outline_approval)
@@ -1288,6 +1293,7 @@ def _prepare_page_context(snapshot) -> Dict[str, object]:
         "can_start": can_start,
         "can_control": can_control,
         "can_queue_chapter_advice": can_queue_chapter_advice,
+        "can_regenerate_chapter": can_regenerate_chapter,
         "can_continue": can_continue,
         "phase_area": phase_area,
         "status_display": status_display,
@@ -1659,7 +1665,7 @@ def _render_writing_tab(context: Dict[str, object]) -> str:
                 </div>
                 <span class="status-chip status-chip--muted" id="selected-chapter-status">{escape(str(context["selected_chapter_status"]))}</span>
               </div>
-              <pre id="selected-chapter-content" class="longform-view chapter-view">{escape(str(context["selected_chapter_text"]))}</pre>
+              <pre id="selected-chapter-content" class="chapter-reader-content">{escape(str(context["selected_chapter_text"]))}</pre>
             </section>
           </div>
 
@@ -1675,7 +1681,7 @@ def _render_writing_tab(context: Dict[str, object]) -> str:
               <h2>Chapter Tools</h2>
               <form method="post" action="/chapter-advice" class="async-form">
                 <label class="label" for="chapter_advice_number">Chapter Number</label>
-                <input id="chapter_advice_number" type="number" min="1" max="{snapshot.total_chapters or snapshot.num_chapters or 1}" name="chapter_number" value="{context["selected_chapter_number"] or snapshot.current_chapter or 1}">
+                <input id="chapter_advice_number" type="number" min="1" name="chapter_number" value="{context["selected_chapter_number"] or snapshot.current_chapter or 1}">
                 <label class="label" for="advice">Replacement beats for the next attempt</label>
                 <textarea class="advice-box" id="advice" name="advice" placeholder="Example: 1. He stalls at the threshold. 2. She notices the blood on his cuff. 3. Their argument expands into the hidden ledger reveal."></textarea>
                 <label class="label" for="chapter_advice_target_word_count">Optional replacement target word count</label>
@@ -1686,9 +1692,9 @@ def _render_writing_tab(context: Dict[str, object]) -> str:
               </form>
               <form method="post" action="/regenerate-chapter" class="async-form">
                 <label class="label" for="regen_chapter_number">Regenerate Chapter</label>
-                <input id="regen_chapter_number" type="number" min="1" max="{snapshot.total_chapters or snapshot.num_chapters or 1}" name="chapter_number" value="{context["selected_chapter_number"] or snapshot.current_chapter or 1}">
+                <input id="regen_chapter_number" type="number" min="1" name="chapter_number" value="{context["selected_chapter_number"] or snapshot.current_chapter or 1}">
                 <div class="controls chapter-action">
-                  <button id="regen-chapter-button" {"disabled" if snapshot.run_active or not snapshot.outline_approved else ""}>&#8635; Regenerate Chapter</button>
+                  <button id="regen-chapter-button" {"disabled" if not context["can_regenerate_chapter"] else ""}>&#8635; Regenerate Chapter</button>
                 </div>
               </form>
               <div class="subheading">Last queued advice</div>
@@ -1770,6 +1776,14 @@ def _render_editing_tab() -> str:
 
 
 class BookUIHandler(BaseHTTPRequestHandler):
+    def _send_async_error(self, status: HTTPStatus, message: str) -> None:
+        encoded = message.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path == "/events":
@@ -1909,7 +1923,12 @@ class BookUIHandler(BaseHTTPRequestHandler):
                 target_word_count,
             )
         elif path == "/regenerate-chapter":
-            controller.regenerate_chapter(int(_first(form, "chapter_number", "1") or "1"))
+            started = controller.regenerate_chapter(int(_first(form, "chapter_number", "1") or "1"))
+            if not started:
+                message = controller.get_snapshot().latest_error or "Unable to regenerate that chapter right now."
+                if is_async:
+                    self._send_async_error(HTTPStatus.CONFLICT, message)
+                    return
         elif path == "/stop":
             controller.stop_run()
         else:

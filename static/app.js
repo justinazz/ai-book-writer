@@ -6,7 +6,7 @@
   let lastWaitingForInput = Boolean(initialState.waiting_for_input);
   let lastCompletionSignal = completionSignalFor(initialState);
   let activeModalSourceId = "";
-  let forceNextFormSync = false;
+  let pendingSync = { full: false, models: false };
   let lastRenderedChapterDetailSignature = "";
   const initialReaderTarget = defaultReaderTargetFor(initialState);
   let selectedReaderView = initialReaderTarget.view;
@@ -19,6 +19,50 @@
 
   function byId(id) {
     return document.getElementById(id);
+  }
+
+  function queueSync(options = {}) {
+    pendingSync = {
+      full: Boolean(options.full),
+      models: Boolean(options.models),
+    };
+  }
+
+  function resetQueuedSync() {
+    pendingSync = { full: false, models: false };
+  }
+
+  function syncBehaviorForAction(action) {
+    if (action === "/load-config" || action === "/load-external-config") {
+      return { full: true, models: true };
+    }
+    if (action === "/refresh-models") {
+      return { full: false, models: true };
+    }
+    return { full: false, models: false };
+  }
+
+  async function responseMessage(response) {
+    const raw = (await response.text()).trim();
+    if (!raw) {
+      return `Request failed (${response.status} ${response.statusText})`;
+    }
+    if (raw.startsWith("{")) {
+      try {
+        const payload = JSON.parse(raw);
+        if (payload && typeof payload.error === "string" && payload.error.trim()) {
+          return payload.error.trim();
+        }
+      } catch (_error) {
+      }
+    }
+    return raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  }
+
+  function showAsyncError(message) {
+    const text = String(message || "Request failed.").trim();
+    const latestError = byId("latest-error");
+    if (latestError) latestError.textContent = text;
   }
 
   function setBoundText(binding, value) {
@@ -339,7 +383,7 @@
   function setFieldValue(fieldId, value) {
     const element = byId(fieldId);
     if (!element) return;
-    if (!forceNextFormSync && isFieldLocked(fieldId)) return;
+    if (!pendingSync.full && isFieldLocked(fieldId)) return;
     element.value = value ?? "";
     dirtyFields.delete(fieldId);
   }
@@ -372,7 +416,7 @@
     if (!container) return;
     const details = values || {};
     const existingDetails = collectChapterDetailsFields();
-    const mergedDetails = forceNextFormSync ? details : { ...details, ...existingDetails };
+    const mergedDetails = pendingSync.full ? details : { ...details, ...existingDetails };
     const total = Math.max(1, Number(numChapters || 1));
     const normalizedDetails = {};
     for (let chapter = 1; chapter <= total; chapter += 1) {
@@ -383,7 +427,7 @@
       };
     }
     const signature = JSON.stringify({ total, details: normalizedDetails });
-    if (!forceNextFormSync && signature === lastRenderedChapterDetailSignature) return;
+    if (!pendingSync.full && signature === lastRenderedChapterDetailSignature) return;
     let html = "";
     for (let chapter = 1; chapter <= total; chapter += 1) {
       const detail = normalizedDetails[chapter];
@@ -491,10 +535,10 @@
   function syncSelectedChapterInputs(chapterNumber, state) {
     const adviceField = byId("chapter_advice_number");
     const regenField = byId("regen_chapter_number");
-    if (adviceField && document.activeElement !== adviceField) {
+    if (adviceField && document.activeElement !== adviceField && !dirtyFields.has("chapter_advice_number")) {
       adviceField.value = chapterNumber || state.current_chapter || 1;
     }
-    if (regenField && document.activeElement !== regenField) {
+    if (regenField && document.activeElement !== regenField && !dirtyFields.has("regen_chapter_number")) {
       regenField.value = chapterNumber || state.current_chapter || 1;
     }
   }
@@ -587,7 +631,7 @@
 
     setFieldValue("endpoint_url", state.endpoint_url || "");
     setFieldValue("config_name", state.config_name || "");
-    if (forceNextFormSync || (!isFieldLocked("outline_model") && !isFieldLocked("writer_model"))) {
+    if (pendingSync.full || pendingSync.models || (!isFieldLocked("outline_model") && !isFieldLocked("writer_model"))) {
       syncModels(state.available_models || [], state.outline_model || "", state.writer_model || "");
       dirtyFields.delete("outline_model");
       dirtyFields.delete("writer_model");
@@ -645,7 +689,7 @@
     byId("approve-outline-button").disabled = !state.awaiting_outline_approval;
     byId("regen-outline-button").disabled = !state.awaiting_outline_approval;
     byId("chapter-advice-button").disabled = !state.run_active && !state.resume_available;
-    byId("regen-chapter-button").disabled = state.run_active || !state.outline_approved;
+    byId("regen-chapter-button").disabled = !state.outline_approved || state.awaiting_outline_approval || (state.run_active && !state.waiting_for_input);
 
     if (state.busy && state.progress?.current_agent && state.progress.current_agent !== "idle" && state.progress.current_agent !== lastAgent) {
       playSoftCue();
@@ -668,7 +712,7 @@
         lastCompletionSignal = completionSignal;
       }
     }
-    forceNextFormSync = false;
+    resetQueuedSync();
   }
 
   function bindEditableFields(root = document) {
@@ -700,7 +744,7 @@
           }
         }
         try {
-          await fetch(action, {
+          const response = await fetch(action, {
             method: "POST",
             body: new URLSearchParams(formData).toString(),
             headers: {
@@ -708,9 +752,26 @@
               "X-Requested-With": "fetch",
             },
           });
-          forceNextFormSync = true;
-          Array.from(form.elements || []).forEach((field) => field.id && dirtyFields.delete(field.id));
+          if (!response.ok) {
+            showAsyncError(await responseMessage(response));
+            return;
+          }
+          queueSync(syncBehaviorForAction(action));
+          if (action === "/load-config") {
+            dirtyFields.clear();
+          } else if (action !== "/refresh-models") {
+            Array.from(form.elements || []).forEach((field) => field.id && dirtyFields.delete(field.id));
+          }
+          if (action === "/chapter-advice" || action === "/advice") {
+            const targetChapter = Number(formData.get("chapter_number") || "0");
+            const regenField = byId("regen_chapter_number");
+            if (regenField && targetChapter > 0) {
+              regenField.value = targetChapter;
+              dirtyFields.add("regen_chapter_number");
+            }
+          }
         } catch (_error) {
+          showAsyncError("Request failed. Please retry.");
         } finally {
           delete form.dataset.submitAction;
         }
@@ -736,9 +797,7 @@
     if (!file) return;
     const text = await file.text();
     try {
-      forceNextFormSync = true;
-      dirtyFields.clear();
-      await fetch("/load-external-config", {
+      const response = await fetch("/load-external-config", {
         method: "POST",
         body: text,
         headers: {
@@ -746,7 +805,14 @@
           "X-Requested-With": "fetch",
         },
       });
+      if (!response.ok) {
+        showAsyncError(await responseMessage(response));
+        return;
+      }
+      queueSync(syncBehaviorForAction("/load-external-config"));
+      dirtyFields.clear();
     } catch (_error) {
+      showAsyncError("External config load failed. Please retry.");
     } finally {
       event.target.value = "";
     }

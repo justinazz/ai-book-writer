@@ -8,8 +8,8 @@ import os
 import threading
 import traceback
 from typing import Callable, Dict, List, Optional
-from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from agents import BookAgents
 from book_generator import BookGenerator, GenerationPauseRequested
@@ -304,6 +304,15 @@ class GenerationController:
         next_chapter = int(chapter_number) + 1
         return next_chapter if 1 <= next_chapter <= total_chapters else 0
 
+    def _resume_target_after_failure(self) -> int:
+        with self._lock:
+            has_outline = bool((self._state.outline_text or "").strip())
+            chapter_number = int(self._state.current_chapter or 0)
+            total = int(self._state.total_chapters or self._state.num_chapters or 0)
+        if has_outline and 1 <= chapter_number <= total:
+            return chapter_number
+        return 0
+
     def _should_stop_chapter_generation(self) -> bool:
         with self._lock:
             return bool(self._state.stop_requested)
@@ -551,6 +560,128 @@ class GenerationController:
                 self._state.available_models = []
                 self._state.model_fetch_error = str(exc)
                 self._append_event(f"{_utc_timestamp()} - Model refresh failed: {exc}")
+
+    def _extract_provider_error_message(self, raw_body: str) -> str:
+        text = (raw_body or "").strip()
+        if not text:
+            return ""
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return " ".join(text.split())
+
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message", "")).strip()
+                if message:
+                    return message
+            message = str(payload.get("message", "")).strip()
+            if message:
+                return message
+        return " ".join(text.split())
+
+    def _validate_model_chat_completion(
+        self,
+        *,
+        endpoint_url: str,
+        model: str,
+        role_label: str,
+        reasoning_effort: Optional[str] = None,
+        extra_body: Optional[Dict[str, object]] = None,
+    ) -> None:
+        model_name = str(model or "").strip()
+        base_url = str(endpoint_url or "").strip() or DEFAULT_BASE_URL
+        if not model_name:
+            raise ValueError(f"No {role_label} selected.")
+
+        payload: Dict[str, object] = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "Reply with OK only."}],
+            "max_tokens": 1,
+        }
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        if extra_body:
+            payload.update(extra_body)
+
+        request = Request(
+            f"{base_url.rstrip('/')}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer not-needed",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                response.read()
+        except HTTPError as exc:
+            raw_body = exc.read().decode("utf-8", errors="replace")
+            detail = self._extract_provider_error_message(raw_body) or f"HTTP {exc.code}"
+            raise RuntimeError(
+                f"The configured {role_label} '{model_name}' at {base_url} rejected a test chat completion: "
+                f"{detail}. Pick a different model or reload it in the local provider, then retry."
+            ) from exc
+        except (OSError, URLError) as exc:
+            raise RuntimeError(
+                f"Could not validate the configured {role_label} '{model_name}' at {base_url}: {exc}"
+            ) from exc
+
+    def _validate_selected_models(
+        self,
+        *,
+        endpoint_url: str,
+        outline_model: str,
+        writer_model: str,
+        reasoning_effort: Optional[str] = None,
+        extra_body: Optional[Dict[str, object]] = None,
+    ) -> None:
+        grouped_roles: Dict[str, List[str]] = {}
+        for role_label, model_name in (
+            ("outline model", outline_model),
+            ("writer model", writer_model),
+        ):
+            grouped_roles.setdefault(str(model_name or "").strip(), []).append(role_label)
+
+        for model_name, role_labels in grouped_roles.items():
+            if not model_name:
+                missing_role = role_labels[0] if role_labels else "model"
+                raise ValueError(f"No {missing_role} selected.")
+            self._validate_model_chat_completion(
+                endpoint_url=endpoint_url,
+                model=model_name,
+                role_label=" and ".join(role_labels),
+                reasoning_effort=reasoning_effort,
+                extra_body=extra_body,
+            )
+
+    def _annotate_model_runtime_error(
+        self,
+        message: str,
+        *,
+        endpoint_url: str,
+        outline_model: str,
+        writer_model: str,
+    ) -> str:
+        text = message.strip()
+        if not text or "Failed to load model" not in text:
+            return text
+        if "Pick a different model or reload it in the local provider" in text:
+            return text
+
+        config_bits = []
+        if outline_model:
+            config_bits.append(f"outline_model={outline_model}")
+        if writer_model:
+            config_bits.append(f"writer_model={writer_model}")
+        config_suffix = f" Current selection: {', '.join(config_bits)}." if config_bits else ""
+        return (
+            f"{text} Endpoint: {endpoint_url}.{config_suffix} "
+            "The provider is rejecting chat completions for one of the selected models. "
+            "Pick a different model or reload it in the local provider, then retry or resume."
+        )
 
     def build_prompt(self, sections: PromptSections) -> str:
         return "\n\n".join(
@@ -893,10 +1024,30 @@ class GenerationController:
 
     def regenerate_chapter(self, chapter_number: int) -> bool:
         with self._condition:
-            if self._thread and self._thread.is_alive():
+            total_chapters = int(self._state.total_chapters or self._state.num_chapters or 0)
+            if not (1 <= int(chapter_number or 0) <= max(total_chapters, 1)):
+                self._state.latest_error = f"Chapter {chapter_number} is outside the current outline range."
+                self._state.phase_version += 1
+                self._append_event(f"{_utc_timestamp()} - {self._state.latest_error}")
                 return False
             if not self._state.outline_approved or not self._state.outline_text:
+                self._state.latest_error = "Approve the outline before regenerating a chapter."
+                self._state.phase_version += 1
+                self._append_event(f"{_utc_timestamp()} - {self._state.latest_error}")
                 return False
+
+        if not self._pause_waiting_thread_for_regeneration(chapter_number):
+            return False
+
+        with self._condition:
+            if self._thread and self._thread.is_alive():
+                self._state.latest_error = (
+                    "Chapter regeneration is only available while writing is paused at a chapter checkpoint."
+                )
+                self._state.phase_version += 1
+                self._append_event(f"{_utc_timestamp()} - {self._state.latest_error}")
+                return False
+            self._state.latest_error = ""
             self._state.run_active = True
             self._state.busy = True
             self._state.status = "running"
@@ -1129,6 +1280,71 @@ class GenerationController:
                 self._state.outline_regeneration_requested = False
                 return "regenerate"
             return "approved"
+
+    def _set_checkpoint_display(self, title: str, body: str) -> None:
+        with self._condition:
+            self._state.current_checkpoint_title = title
+            self._state.current_checkpoint_body = body
+            self._state.phase_version += 1
+            self._append_event(f"{_utc_timestamp()} - Checkpoint: {title}")
+
+    def _current_resume_target_for_intervention(self) -> int:
+        if self._state.resume_available:
+            return int(self._state.resume_chapter_number or 0)
+
+        chapter_number = int(self._state.current_chapter or 0)
+        total_chapters = int(self._state.total_chapters or self._state.num_chapters or 0)
+        if not (1 <= chapter_number <= total_chapters):
+            return 0
+
+        checkpoint_title = (self._state.current_checkpoint_title or "").strip().lower()
+        if checkpoint_title.startswith(f"chapter {chapter_number} ") and (
+            checkpoint_title.endswith(" complete") or checkpoint_title.endswith(" regenerated")
+        ):
+            return self._next_resume_chapter(chapter_number)
+        return chapter_number
+
+    def _pause_waiting_thread_for_regeneration(self, chapter_number: int) -> bool:
+        waiting_thread: Optional[threading.Thread] = None
+        with self._condition:
+            if not (self._thread and self._thread.is_alive()):
+                return True
+            if not self._state.waiting_for_input or self._state.awaiting_outline_approval:
+                self._state.latest_error = (
+                    "Wait for a writing checkpoint before regenerating a chapter."
+                )
+                self._state.phase_version += 1
+                self._append_event(f"{_utc_timestamp()} - {self._state.latest_error}")
+                return False
+
+            resume_target = self._current_resume_target_for_intervention()
+            if resume_target > 0:
+                self._state.resume_available = True
+                self._state.resume_chapter_number = resume_target
+
+            self._state.stop_requested = True
+            self._state.waiting_for_input = False
+            self._state.phase = f"Preparing to regenerate chapter {chapter_number}"
+            self._state.busy = False
+            self._state.phase_version += 1
+            self._append_event(
+                f"{_utc_timestamp()} - Closing the active checkpoint before regenerating chapter {chapter_number}"
+            )
+            waiting_thread = self._thread
+            self._condition.notify_all()
+
+        if waiting_thread:
+            waiting_thread.join(timeout=10.0)
+            if waiting_thread.is_alive():
+                self.report_error(
+                    f"Could not close the current checkpoint before regenerating chapter {chapter_number}."
+                )
+                return False
+
+        with self._condition:
+            if self._thread is waiting_thread and waiting_thread and not waiting_thread.is_alive():
+                self._thread = None
+        return True
 
     def _mark_finished(
         self,
@@ -1412,6 +1628,13 @@ class GenerationController:
                 "enable_thinking": False,
             } if reduce_thinking else None
             reasoning_effort = "low" if reduce_thinking else None
+            self._validate_selected_models(
+                endpoint_url=endpoint_url,
+                outline_model=outline_model,
+                writer_model=writer_model,
+                reasoning_effort=reasoning_effort,
+                extra_body=extra_body,
+            )
             outline = self._parse_outline()
             if not outline:
                 raise ValueError("No approved outline available to resume generation")
@@ -1438,6 +1661,12 @@ class GenerationController:
         except Exception as exc:  # pragma: no cover
             trace = traceback.format_exc()
             error_message = _format_exception(exc)
+            error_message = self._annotate_model_runtime_error(
+                error_message,
+                endpoint_url=endpoint_url,
+                outline_model=outline_model,
+                writer_model=writer_model,
+            )
             if self._state.reduce_thinking:
                 error_message = (
                     f"{error_message} | No Thinking payload="
@@ -1510,6 +1739,13 @@ class GenerationController:
             )
             self._log_runtime_block("RUN INPUT | BASE PROMPT", prompt)
             self._log_runtime_block("RUN INPUT | OUTLINE PROMPT", outline_prompt)
+            self._validate_selected_models(
+                endpoint_url=endpoint_url,
+                outline_model=outline_model,
+                writer_model=writer_model,
+                reasoning_effort=reasoning_effort,
+                extra_body=extra_body,
+            )
             approved_outline: List[Dict] = []
             while True:
                 with self._lock:
@@ -1592,6 +1828,12 @@ class GenerationController:
         except Exception as exc:  # pragma: no cover
             trace = traceback.format_exc()
             error_message = _format_exception(exc)
+            error_message = self._annotate_model_runtime_error(
+                error_message,
+                endpoint_url=endpoint_url,
+                outline_model=outline_model,
+                writer_model=writer_model,
+            )
             if self._state.reduce_thinking:
                 error_message = (
                     f"{error_message} | No Thinking payload="
@@ -1602,7 +1844,17 @@ class GenerationController:
             with self._lock:
                 if 1 <= self._state.current_chapter <= len(self._state.chapters):
                     self._state.chapters[self._state.current_chapter - 1].status = "failed"
-            self._mark_finished("failed", "Generation failed", error_message)
+            resume_chapter = self._resume_target_after_failure()
+            phase = "Generation failed"
+            if resume_chapter > 0:
+                phase = f"Generation failed. Ready to resume from chapter {resume_chapter}."
+            self._mark_finished(
+                "failed",
+                phase,
+                error_message,
+                resume_available=resume_chapter > 0,
+                resume_chapter_number=resume_chapter,
+            )
             with self._lock:
                 self._append_event(f"{_utc_timestamp()} - Run failed: {error_message}")
 
@@ -1651,6 +1903,13 @@ class GenerationController:
                 ]),
             )
             self._log_runtime_block(f"CHAPTER REGEN INPUT | BASE PROMPT | CHAPTER {chapter_number}", prompt)
+            self._validate_selected_models(
+                endpoint_url=endpoint_url,
+                outline_model=outline_model,
+                writer_model=writer_model,
+                reasoning_effort=reasoning_effort,
+                extra_body=extra_body,
+            )
             outline = self._parse_outline()
             if not outline:
                 raise ValueError("No approved outline available for regeneration")
@@ -1681,16 +1940,18 @@ class GenerationController:
             chapter_text = self._read_chapter_text(chapter_number)
             self._store_chapter_result(chapter_number, result, chapter_text)
             self._set_chapter_status(chapter_number, "completed", chapter["title"])
-            self._checkpoint(f"Chapter {chapter_number} regenerated", chapter_text)
+            self._set_checkpoint_display(f"Chapter {chapter_number} regenerated", chapter_text)
             resume_chapter = self._get_resume_chapter_number()
             if resume_chapter == chapter_number:
                 resume_chapter = self._next_resume_chapter(chapter_number)
             resume_available = resume_chapter > 0
             phase = f"Chapter {chapter_number} regeneration complete"
+            final_status = "completed"
             if resume_available:
                 phase = f"{phase}. Ready to resume from chapter {resume_chapter}."
+                final_status = "stopped"
             self._mark_finished(
-                "completed",
+                final_status,
                 phase,
                 resume_available=resume_available,
                 resume_chapter_number=resume_chapter,
@@ -1713,6 +1974,12 @@ class GenerationController:
         except Exception as exc:  # pragma: no cover
             trace = traceback.format_exc()
             error_message = _format_exception(exc)
+            error_message = self._annotate_model_runtime_error(
+                error_message,
+                endpoint_url=endpoint_url,
+                outline_model=outline_model,
+                writer_model=writer_model,
+            )
             if self._state.reduce_thinking:
                 error_message = (
                     f"{error_message} | No Thinking payload="
