@@ -4,7 +4,7 @@ from book_generator import BookGenerator, MAX_UNBROKEN_TOKEN_CHARS
 
 
 def _make_generator() -> BookGenerator:
-    return BookGenerator(agents={}, agent_config={}, outline=[])
+    return BookGenerator(agents={}, agent_config={}, outline=[], output_dir=".")
 
 
 def test_compact_text_for_prompt_truncates_overlong_unbroken_tokens() -> None:

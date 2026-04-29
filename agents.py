@@ -102,6 +102,7 @@ class BookAgents:
             - [Event 1]
             - [Event 2]
             - [Event 3]
+            - [Event n]
             Character Developments: [Specific character moments and changes]
             Setting: [Specific location and atmosphere]
             Tone: [Specific emotional and narrative tone]
