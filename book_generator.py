@@ -54,6 +54,7 @@ class BookGenerator:
         output_dir: Optional[str] = None,
         max_iterations: int = 5,
         progress_callback: Optional[Callable[[Dict], None]] = None,
+        monitor_callback: Optional[Callable[[Dict], None]] = None,
         diagnostic_logger: Optional[Callable[[str], None]] = None,
         chapter_prompt_provider: Optional[Callable[[int, int, str, str], Dict]] = None,
         validation_callback: Optional[Callable[[Dict], None]] = None,
@@ -74,6 +75,7 @@ class BookGenerator:
         self.max_iterations = max(1, max_iterations)
         self.outline = outline  # Store the outline
         self.progress_callback = progress_callback
+        self.monitor_callback = monitor_callback
         self.diagnostic_logger = diagnostic_logger
         self.chapter_prompt_provider = chapter_prompt_provider
         self.validation_callback = validation_callback
@@ -173,6 +175,15 @@ class BookGenerator:
             "output_stage": output_stage,
             "iteration": iteration,
             "max_iterations": self.max_iterations,
+        })
+
+    def _emit_monitor(self, kind: str, label: str, text: str) -> None:
+        if not self.monitor_callback:
+            return
+        self.monitor_callback({
+            "kind": kind,
+            "label": label,
+            "text": text,
         })
 
     def _resolve_chapter_prompt_for_attempt(
@@ -1546,6 +1557,8 @@ class BookGenerator:
             f"CHAPTER {chapter_number} | ATTEMPT {attempt} | STEP {step_name} | INPUT | PROMPT | {agent.name}",
             prompt,
         )
+        label = f"CHAPTER {chapter_number} | ATTEMPT {attempt} | STEP {step_name} | {agent.name}"
+        self._emit_monitor("input", label, prompt)
         retry_delays = (1.0, 3.0)
         for retry_index in range(len(retry_delays) + 1):
             try:
@@ -1568,6 +1581,7 @@ class BookGenerator:
                 )
                 time.sleep(delay)
         output = self._extract_last_content(chat_result.chat_history)
+        self._emit_monitor("output", label, output)
         self._log_block(
             f"CHAPTER {chapter_number} | ATTEMPT {attempt} | STEP {step_name} | OUTPUT | {agent.name}",
             output,

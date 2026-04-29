@@ -15,8 +15,6 @@ class BookAgents:
         self.agent_config = agent_config
         self.writer_agent_config = writer_agent_config or agent_config
         self.outline = outline
-        self.world_elements = {}  # Track described locations/elements
-        self.character_developments = {}  # Track character arcs
         
     def _format_outline_context(self) -> str:
         """Format the book outline into a readable context"""
@@ -268,34 +266,3 @@ class BookAgents:
             "user_proxy": user_proxy,
             "outline_creator": outline_creator
         }
-
-    def update_world_element(self, element_name: str, description: str) -> None:
-        """Track a new or updated world element"""
-        self.world_elements[element_name] = description
-
-    def update_character_development(self, character_name: str, development: str) -> None:
-        """Track character development"""
-        if character_name not in self.character_developments:
-            self.character_developments[character_name] = []
-        self.character_developments[character_name].append(development)
-
-    def get_world_context(self) -> str:
-        """Get formatted world-building context"""
-        if not self.world_elements:
-            return "No established world elements yet."
-        
-        return "\n".join([
-            "Established World Elements:",
-            *[f"- {name}: {desc}" for name, desc in self.world_elements.items()]
-        ])
-
-    def get_character_context(self) -> str:
-        """Get formatted character development context"""
-        if not self.character_developments:
-            return "No character developments tracked yet."
-        
-        return "\n".join([
-            "Character Development History:",
-            *[f"- {name}:\n  " + "\n  ".join(devs) 
-              for name, devs in self.character_developments.items()]
-        ])

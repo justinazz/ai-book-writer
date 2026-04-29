@@ -20,6 +20,9 @@ venv\Scripts\python.exe web_ui.py
 
 3. Open `http://127.0.0.1:8001`
 
+The web UI defaults to port `8001`. To use a different port, update
+`WEB_UI_PORT` in `config.py` before starting `web_ui.py`.
+
 On Windows you can also use:
 
 ```bat
@@ -257,6 +260,7 @@ Note:
 
 - `mode` is not stored in configs
 - `version` is not stored in configs
+- `characters` may be either one string or an array of strings in `prompt_sections` and in each `chapter_details` entry; arrays are read as newline-separated text
 
 ## Outline Approval
 

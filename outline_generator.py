@@ -11,11 +11,13 @@ class OutlineGenerator:
         agents: Dict[str, autogen.ConversableAgent],
         agent_config: Dict,
         progress_callback: Optional[Callable[[Dict], None]] = None,
+        monitor_callback: Optional[Callable[[Dict], None]] = None,
         diagnostic_logger: Optional[Callable[[str], None]] = None,
     ):
         self.agents = agents
         self.agent_config = agent_config
         self.progress_callback = progress_callback
+        self.monitor_callback = monitor_callback
         self.diagnostic_logger = diagnostic_logger
         self.chapter_detail_event_fallbacks: Dict[int, List[str]] = {}
 
@@ -47,6 +49,15 @@ class OutlineGenerator:
             "max_iterations": 1,
         })
 
+    def _emit_monitor(self, kind: str, label: str, text: str) -> None:
+        if not self.monitor_callback:
+            return
+        self.monitor_callback({
+            "kind": kind,
+            "label": label,
+            "text": text,
+        })
+
     def _extract_last_content(self, chat_history: List[Dict]) -> str:
         for msg in reversed(chat_history):
             content = (msg.get("content") or "").strip()
@@ -56,8 +67,10 @@ class OutlineGenerator:
 
     def _run_agent_step(self, step_name: str, agent: autogen.ConversableAgent, prompt: str, detail: str) -> str:
         self._emit_progress(agent.name, step_name, detail)
+        label = f"OUTLINE | STEP {step_name} | {agent.name}"
         self._log_agent_setup(agent, f"OUTLINE | STEP {step_name}")
         self._log_block(f"OUTLINE | STEP {step_name} | INPUT | PROMPT | {agent.name}", prompt)
+        self._emit_monitor("input", label, prompt)
         chat_result = self.agents["user_proxy"].initiate_chat(
             agent,
             clear_history=True,
@@ -66,6 +79,7 @@ class OutlineGenerator:
             message=prompt,
         )
         output = self._extract_last_content(chat_result.chat_history)
+        self._emit_monitor("output", label, output)
         self._log_block(f"OUTLINE | STEP {step_name} | OUTPUT | {agent.name}", output)
         return output
 
@@ -221,132 +235,6 @@ Requirements:
 - Keep numbering sequential and titles clear.
 - Output outline content only. Do not include STORY_ARC, WORLD_ELEMENTS, commentary, or notes.
 {chapter_beats_priority_note}
-
-Book Premise:
-{initial_prompt}
-
-Story Arc:
-{story_arc}
-
-World Elements:
-{world_elements}"""
-
-    def _build_outline_repair_prompt(
-        self,
-        initial_prompt: str,
-        story_arc: str,
-        world_elements: str,
-        repair_targets: List[Dict],
-        valid_chapters: List[Dict],
-    ) -> str:
-        repair_lines = []
-        for target in repair_targets:
-            title = target.get("title", "") or f"Chapter {target['chapter_number']}"
-            repair_lines.append(
-                f"- Chapter {target['chapter_number']}: {title} -- {target['issue']}"
-            )
-
-        accepted_lines = [
-            f"- Chapter {chapter['chapter_number']}: {chapter['title']}"
-            for chapter in sorted(valid_chapters, key=lambda item: item["chapter_number"])
-        ]
-        accepted_text = "\n".join(accepted_lines) if accepted_lines else "- None"
-
-        highest_repair_chapter = max(int(target["chapter_number"]) for target in repair_targets)
-
-        return f"""Repair the outline by regenerating only the missing or invalid chapters listed below.
-
-Return the repaired chapters in this exact format:
-
-OUTLINE:
-Chapter N: [Title]
-Chapter Title: [Same title as above]
-Key Events:
-- [Event 1]
-- [Event 2]
-- [Event 3]
-Character Developments: [specific character moments and changes]
-Setting: [specific location and atmosphere]
-Tone: [specific emotional and narrative tone]
-
-[Repeat this exact structure for every listed chapter only]
-
-END OF OUTLINE
-
-Requirements:
-- Return only the chapters listed under "Chapters To Repair".
-- Preserve the listed chapter numbers exactly.
-- Keep an existing chapter title when one is provided, unless it is clearly broken.
-- Every repaired chapter must contain at least 3 distinct, specific key events.
-- If chapter details provide multiple beats, convert them into 3-5 concrete key events instead of 1-2 broad summaries.
-- When chapter details include purpose, setting, tone, characters, must-include items, avoid items, or chapter guidance, carry them into the repaired chapter outline instead of dropping them.
-- Faithful paraphrase of beats is acceptable; preserve the narrative intent and progression.
-- Do not repeat already accepted chapters.
-- Do not include commentary, notes, STORY_ARC, or WORLD_ELEMENTS in the response.
-- Continue the same story progression consistently from the accepted chapters.
-
-Chapters To Repair:
-{chr(10).join(repair_lines)}
-
-Already Accepted Chapters:
-{accepted_text}
-
-Book Premise:
-{initial_prompt}
-
-Story Arc:
-{story_arc}
-
-World Elements:
-{world_elements}
-
-Generate repaired chapters through Chapter {highest_repair_chapter} only for the chapters listed above."""
-
-    def _build_outline_redraft_prompt(
-        self,
-        initial_prompt: str,
-        story_arc: str,
-        world_elements: str,
-        num_chapters: int,
-        failed_outline_output: str,
-    ) -> str:
-        failed_excerpt = (failed_outline_output or "").strip()
-        if len(failed_excerpt) > 4000:
-            failed_excerpt = failed_excerpt[:4000].rstrip() + "\n...[truncated]"
-        failed_excerpt = failed_excerpt or "[empty]"
-
-        return f"""The previous outline draft was unusable. Regenerate the full outline from scratch.
-
-Return the outline in this exact format:
-
-OUTLINE:
-Chapter 1: [Title]
-Chapter Title: [Same title as above]
-Key Events:
-- [Event 1]
-- [Event 2]
-- [Event 3]
-Character Developments: [specific character moments and changes]
-Setting: [specific location and atmosphere]
-Tone: [specific emotional and narrative tone]
-
-[Repeat this exact structure for every remaining chapter through Chapter {num_chapters}]
-
-END OF OUTLINE
-
-Requirements:
-- Include every chapter from 1 through {num_chapters}.
-- Do not skip chapters, combine chapters, or leave placeholders.
-- Every chapter must contain at least 3 distinct, specific key events.
-- If chapter details provide multiple beats, convert them into 3-5 concrete key events instead of 1-2 broad summaries.
-- When chapter details include purpose, setting, tone, characters, must-include items, avoid items, or chapter guidance, reflect them in the regenerated outline instead of flattening them away.
-- Faithful paraphrase of beats is acceptable; preserve the narrative intent and progression.
-- Keep numbering sequential and titles clear.
-- Output outline content only. Do not include STORY_ARC, WORLD_ELEMENTS, commentary, or notes.
-- Start over cleanly. Do not explain the failure. Do not repeat malformed formatting from the previous attempt.
-
-Previous Failed Outline Output:
-{failed_excerpt}
 
 Book Premise:
 {initial_prompt}
@@ -550,60 +438,6 @@ World Elements:
             f"- Tone: {tone or 'Tone inferred from chapter summary.'}",
         ])
 
-    def _extract_numbered_outline(self, outline_content: str, num_chapters: int) -> List[Dict]:
-        chapters = []
-        pattern = re.compile(
-            r'^\s*(\d+)\.\s*Chapter\s+Title\s*:\s*["“]?(.+?)["”]?\s*$',
-            re.IGNORECASE | re.MULTILINE,
-        )
-        matches = list(pattern.finditer(outline_content))
-        if not matches:
-            return []
-
-        for index, match in enumerate(matches):
-            chapter_number = int(match.group(1))
-            title = match.group(2).strip()
-            start = match.end()
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(outline_content)
-            section = outline_content[start:end]
-
-            events_text = self._extract_section_block(
-                section,
-                ["- Key Events", "Key Events", "Events", "Scenes", "Scene Beats"],
-                ["- Character Developments", "Character Developments", "- Setting/World Elements", "Setting/World Elements", "- Setting", "Setting", "- Tone", "Tone"],
-            )
-            character_text = self._extract_section_block(
-                section,
-                ["- Character Developments", "Character Developments", "Characters"],
-                ["- Setting/World Elements", "Setting/World Elements", "- Setting", "Setting", "- Tone", "Tone"],
-            )
-            setting_text = self._extract_section_block(
-                section,
-                ["- Setting/World Elements", "Setting/World Elements", "- Setting", "Setting", "World Elements", "Location"],
-                ["- Character Developments", "Character Developments", "Characters", "- Tone", "Tone"],
-            )
-            tone_text = self._extract_section_block(
-                section,
-                ["- Tone", "Tone", "Mood"],
-                [],
-            )
-
-            normalized_events = self._normalize_bullets(events_text) if events_text else ""
-
-            if normalized_events:
-                chapters.append(
-                    self._build_chapter_prompt(
-                        chapter_number,
-                        title,
-                        normalized_events,
-                        character_text,
-                        setting_text,
-                        tone_text,
-                    )
-                )
-
-        return self._verify_chapter_sequence(chapters, num_chapters) if chapters else []
-
     def _extract_numbered_outline_partial(self, outline_content: str, log_errors: bool = True) -> List[Dict]:
         chapters = []
         pattern = re.compile(
@@ -736,143 +570,6 @@ World Elements:
                 continue
 
         return chapters
-
-    def _extract_chapter_sections(self, outline_content: str) -> Dict[int, str]:
-        chapter_sections = {}
-        chapter_pattern = re.compile(r'((?:CH?A?P?T?E?R)\s*\d+\s*(?::|-))', re.IGNORECASE)
-        split_sections = chapter_pattern.split(outline_content)
-        for index in range(1, len(split_sections), 2):
-            header = split_sections[index]
-            body = split_sections[index + 1] if index + 1 < len(split_sections) else ""
-            chapter_match = re.search(r'(?:CH?A?P?T?E?R)\s*(\d+)', header, re.IGNORECASE)
-            if not chapter_match:
-                continue
-            chapter_sections[int(chapter_match.group(1))] = f"{header}{body}"
-        return chapter_sections
-
-    def _collect_outline_repair_targets(
-        self,
-        outline_content: str,
-        valid_chapters: List[Dict],
-        num_chapters: int,
-    ) -> List[Dict]:
-        valid_numbers = {int(chapter["chapter_number"]) for chapter in valid_chapters}
-        section_map = self._extract_chapter_sections(outline_content)
-        repair_targets = []
-
-        for chapter_number in range(1, num_chapters + 1):
-            if chapter_number in valid_numbers:
-                continue
-
-            section = section_map.get(chapter_number, "")
-            title = self._extract_chapter_title(section, chapter_number) if section else f"Chapter {chapter_number}"
-            if not section:
-                issue = "chapter is missing entirely from the outline output"
-            else:
-                events_text = self._extract_section_block(
-                    section,
-                    ["Key Events", "Events", "Scenes", "Scene Beats"],
-                    ["Character Developments", "Characters", "Setting", "World Elements", "Tone", "Chapter Title", "Title", "CHAPTER", "CHAPER"],
-                )
-                if not events_text:
-                    issue = "chapter is missing a parseable Key Events block"
-                else:
-                    unique_event_count = len(
-                        list(
-                            dict.fromkeys(
-                                self._extract_event_items(self._normalize_bullets(events_text))
-                            )
-                        )
-                    )
-                    if unique_event_count < 3:
-                        issue = f"chapter has only {unique_event_count} unique key events; at least 3 are required"
-                    else:
-                        issue = "chapter could not be parsed into a valid chapter block"
-
-            repair_targets.append({
-                "chapter_number": chapter_number,
-                "title": title,
-                "issue": issue,
-            })
-
-        return repair_targets
-
-    def _merge_chapter_lists(self, base_chapters: List[Dict], repaired_chapters: List[Dict]) -> List[Dict]:
-        chapter_map = {
-            int(chapter["chapter_number"]): dict(chapter)
-            for chapter in base_chapters
-        }
-        for chapter in repaired_chapters:
-            chapter_map[int(chapter["chapter_number"])] = dict(chapter)
-        return [chapter_map[number] for number in sorted(chapter_map)]
-
-    def _get_missing_chapter_numbers(self, chapters: List[Dict], num_chapters: int) -> List[int]:
-        chapter_map = {}
-        for chapter in chapters:
-            chapter_number = int(chapter.get("chapter_number", 0) or 0)
-            if not (1 <= chapter_number <= num_chapters):
-                continue
-            normalized_prompt = self._normalize_prompt_value(chapter.get("prompt", ""))
-            if normalized_prompt:
-                chapter_map[chapter_number] = True
-        return [chapter_number for chapter_number in range(1, num_chapters + 1) if chapter_number not in chapter_map]
-
-    def _repair_incomplete_outline(
-        self,
-        initial_prompt: str,
-        story_arc: str,
-        world_elements: str,
-        outline_content: str,
-        valid_chapters: List[Dict],
-        num_chapters: int,
-        max_repair_passes: int = 3,
-    ) -> List[Dict]:
-        merged_chapters = list(valid_chapters)
-        current_content = outline_content
-        missing_numbers = self._get_missing_chapter_numbers(merged_chapters, num_chapters)
-
-        for repair_pass in range(1, max_repair_passes + 1):
-            if not missing_numbers:
-                return self._verify_chapter_sequence(merged_chapters, num_chapters)
-
-            repair_targets = self._collect_outline_repair_targets(current_content, merged_chapters, num_chapters)
-            if not repair_targets:
-                break
-
-            target_numbers = [str(target["chapter_number"]) for target in repair_targets]
-            self._log(
-                f"Outline repair pass {repair_pass} targeting chapters: {', '.join(target_numbers)}"
-            )
-            repair_prompt = self._build_outline_repair_prompt(
-                initial_prompt,
-                story_arc,
-                world_elements,
-                repair_targets,
-                merged_chapters,
-            )
-            step_name = "outline_repair" if repair_pass == 1 else f"outline_repair_{repair_pass}"
-            repair_output = self._run_agent_step(
-                step_name,
-                self.agents["outline_creator"],
-                repair_prompt,
-                f"Outline creator is repairing missing chapters (pass {repair_pass})",
-            )
-            current_content = self._extract_outline_content([{"content": repair_output}]) or repair_output
-            repaired_chapters = self._extract_outline_chapters(current_content, num_chapters, log_errors=True)
-            merged_chapters = self._merge_chapter_lists(merged_chapters, repaired_chapters)
-
-            updated_missing_numbers = self._get_missing_chapter_numbers(merged_chapters, num_chapters)
-            recovered_count = len(missing_numbers) - len(updated_missing_numbers)
-            if updated_missing_numbers:
-                self._log(
-                    f"Outline repair pass {repair_pass} recovered {max(recovered_count, 0)} chapters; still missing: "
-                    + ", ".join(str(number) for number in updated_missing_numbers)
-                )
-            else:
-                self._log(f"Outline repair pass {repair_pass} completed the outline.")
-            missing_numbers = updated_missing_numbers
-
-        return self._verify_chapter_sequence(merged_chapters, num_chapters)
 
     def _process_outline_results(self, messages: List[Dict], num_chapters: int) -> List[Dict]:
         """Extract and process the outline with strict format requirements."""

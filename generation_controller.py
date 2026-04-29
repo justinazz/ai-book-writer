@@ -1,7 +1,7 @@
 """Background generation controller for the browser UI."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields as dataclass_fields
+from dataclasses import dataclass, field, fields as dataclass_fields
 from datetime import datetime
 import json
 import os
@@ -14,7 +14,15 @@ from urllib.request import Request, urlopen
 
 from agents import BookAgents
 from book_generator import BookGenerator, GenerationPauseRequested
-from config import DEFAULT_BASE_URL, DEFAULT_MODEL, MAX_ITERATIONS_LIMIT, OUTPUT_FOLDER, get_config
+from config import (
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    MAX_ITERATIONS_LIMIT,
+    OUTLINE_MODEL_TEMPERATURE,
+    OUTPUT_FOLDER,
+    WRITER_MODEL_TEMPERATURE,
+    get_config,
+)
 from outline_generator import OutlineGenerator
 
 
@@ -115,6 +123,11 @@ class RunSnapshot:
     total_chapters: int = 0
     latest_error: str = ""
     latest_advice: str = ""
+    latest_llm_input: str = ""
+    latest_llm_input_label: str = ""
+    latest_llm_output: str = ""
+    latest_llm_output_label: str = ""
+    latest_llm_updated_at: str = ""
     outline_text: str = ""
     current_checkpoint_title: str = ""
     current_checkpoint_body: str = ""
@@ -180,6 +193,7 @@ class GenerationController:
         if not path:
             return
         text = message if message.endswith("\n") else message + "\n"
+        text = f"[{_utc_timestamp()}] {text}"
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
@@ -197,6 +211,8 @@ class GenerationController:
     def _normalize_optional_text(value: object) -> str:
         if value is None:
             return ""
+        if isinstance(value, list):
+            return "\n".join(str(item).strip() for item in value if str(item).strip()).strip()
         return str(value).strip()
 
     @staticmethod
@@ -825,6 +841,11 @@ class GenerationController:
                 total_chapters=self._state.total_chapters,
                 latest_error=self._state.latest_error,
                 latest_advice=self._state.latest_advice,
+                latest_llm_input=self._state.latest_llm_input,
+                latest_llm_input_label=self._state.latest_llm_input_label,
+                latest_llm_output=self._state.latest_llm_output,
+                latest_llm_output_label=self._state.latest_llm_output_label,
+                latest_llm_updated_at=self._state.latest_llm_updated_at,
                 outline_text=self._state.outline_text,
                 current_checkpoint_title=self._state.current_checkpoint_title,
                 current_checkpoint_body=self._state.current_checkpoint_body,
@@ -945,6 +966,7 @@ class GenerationController:
             max_tokens=settings.get("requested_max_tokens"),
             reasoning_effort=settings.get("reasoning_effort"),
             extra_body=settings.get("extra_body"),
+            temperature=WRITER_MODEL_TEMPERATURE,
         )
         return settings
 
@@ -976,6 +998,7 @@ class GenerationController:
         role_label: str,
         reasoning_effort: Optional[str] = None,
         extra_body: Optional[Dict[str, object]] = None,
+        temperature: Optional[float] = None,
     ) -> None:
         model_name = str(model or "").strip()
         base_url = str(endpoint_url or "").strip() or DEFAULT_BASE_URL
@@ -991,6 +1014,8 @@ class GenerationController:
             payload["reasoning_effort"] = reasoning_effort
         if extra_body:
             payload.update(extra_body)
+        if temperature is not None:
+            payload["temperature"] = temperature
 
         request = Request(
             f"{base_url.rstrip('/')}/chat/completions",
@@ -1025,23 +1050,20 @@ class GenerationController:
         reasoning_effort: Optional[str] = None,
         extra_body: Optional[Dict[str, object]] = None,
     ) -> None:
-        grouped_roles: Dict[str, List[str]] = {}
-        for role_label, model_name in (
-            ("outline model", outline_model),
-            ("writer model", writer_model),
+        for role_label, model_name, temperature in (
+            ("outline model", outline_model, OUTLINE_MODEL_TEMPERATURE),
+            ("writer model", writer_model, WRITER_MODEL_TEMPERATURE),
         ):
-            grouped_roles.setdefault(str(model_name or "").strip(), []).append(role_label)
-
-        for model_name, role_labels in grouped_roles.items():
+            model_name = str(model_name or "").strip()
             if not model_name:
-                missing_role = role_labels[0] if role_labels else "model"
-                raise ValueError(f"No {missing_role} selected.")
+                raise ValueError(f"No {role_label} selected.")
             self._validate_model_chat_completion(
                 endpoint_url=endpoint_url,
                 model=model_name,
-                role_label=" and ".join(role_labels),
+                role_label=role_label,
                 reasoning_effort=reasoning_effort,
                 extra_body=extra_body,
+                temperature=temperature,
             )
 
     def _annotate_model_runtime_error(
@@ -2083,6 +2105,24 @@ class GenerationController:
             detail=event.get("detail", ""),
         )
 
+    def _monitor_callback(self, event: Dict) -> None:
+        kind = str(event.get("kind", "")).strip().lower()
+        text = str(event.get("text", "") or "")
+        label = str(event.get("label", "") or "").strip()
+        timestamp = _utc_timestamp()
+        with self._condition:
+            if kind == "input":
+                self._state.latest_llm_input = text
+                self._state.latest_llm_input_label = label
+            elif kind == "output":
+                self._state.latest_llm_output = text
+                self._state.latest_llm_output_label = label
+            else:
+                return
+            self._state.latest_llm_updated_at = timestamp
+            self._state.phase_version += 1
+            self._condition.notify_all()
+
     def _set_idle_progress(self, detail: str = "Idle") -> None:
         self._set_progress(
             chapter_number=0,
@@ -2117,6 +2157,7 @@ class GenerationController:
             max_tokens=requested_max_tokens,
             reasoning_effort=reasoning_effort,
             extra_body=extra_body,
+            temperature=OUTLINE_MODEL_TEMPERATURE,
         )
         writer_config = get_config(
             local_url=endpoint_url,
@@ -2124,6 +2165,7 @@ class GenerationController:
             max_tokens=requested_max_tokens,
             reasoning_effort=reasoning_effort,
             extra_body=extra_body,
+            temperature=WRITER_MODEL_TEMPERATURE,
         )
         book_agents = BookAgents(
             chapter_support_config,
@@ -2143,6 +2185,7 @@ class GenerationController:
             output_dir=output_folder,
             max_iterations=max_iterations,
             progress_callback=self._progress_callback,
+            monitor_callback=self._monitor_callback,
             diagnostic_logger=self._append_output_log,
             chapter_prompt_provider=chapter_prompt_provider,
             validation_callback=self._handle_validation_event,
@@ -2399,6 +2442,7 @@ class GenerationController:
                     max_tokens=requested_max_tokens,
                     reasoning_effort=reasoning_effort,
                     extra_body=extra_body,
+                    temperature=OUTLINE_MODEL_TEMPERATURE,
                 )
                 outline_agents = BookAgents(outline_config)
                 agents = outline_agents.create_agents(current_outline_prompt, num_chapters)
@@ -2406,6 +2450,7 @@ class GenerationController:
                     agents,
                     outline_config,
                     progress_callback=self._progress_callback,
+                    monitor_callback=self._monitor_callback,
                     diagnostic_logger=self._append_output_log,
                 )
                 outline = outline_generator.generate_outline(current_outline_prompt, num_chapters)

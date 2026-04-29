@@ -1,0 +1,510 @@
+{
+  "name": "Vault Road to New Vegas",
+  "created_at": "2026-04-29 19:12:11 UTC",
+  "endpoint_url": "http://127.0.0.1:1234/v1",
+  "outline_model": "qwen/qwen3.5-9b",
+  "writer_model": "nemomix-unleashed-12b@iq4_xs",
+  "num_chapters": 10,
+  "token_limit_enabled": true,
+  "max_tokens": 8192,
+  "reduce_thinking": false,
+  "max_iterations": 50,
+  "chapter_target_word_count": 1000,
+  "overall_word_count_advice": "Aim for a compact 10-chapter adventure of roughly 10,500 to 11,500 words. Keep most chapters near 1,000 words, let the first surface chapter and the New Vegas arrival chapter breathe slightly longer, and keep action scenes sharp rather than sprawling. Each chapter should deliver a clear turn in Mara's external journey and a matching shift in what she believes about the vault, the wasteland, or herself.",
+  "output_folder": "E:\\AI\\BookWriter\\book_output",
+  "chapter_details": {
+    "1": {
+      "purpose": [
+        "Establish Mara Vale's life inside Vault-Tec Vault 70 and give her a personal reason to leave.",
+        "Plant the central mystery: the vault's emergency is real, but the official explanation is not."
+      ],
+      "beats": [
+        "Open during a blackout drill that becomes a real reactor failure, with Mara repairing a flooding maintenance corridor while Vault-Tec slogans stutter over the PA.",
+        "Mara finds hidden surface telemetry proving that the outside world has active settlements, roads, and radio traffic despite years of overseer warnings.",
+        "Her friend Eli Quill helps decode an old supply manifest pointing to a replacement ceramic regulator last logged near New Vegas.",
+        "Overseer Caldera orders the evidence sealed and frames the crisis as temporary, but the vault's water purifier begins pushing metallic gray water.",
+        "Mara volunteers to go outside when she realizes Caldera has no plan beyond rationing and silence.",
+        "End with the vault door rolling open for the first time in Mara's life and sunlight burning white through the dust."
+      ],
+      "target_word_count": 1100,
+      "chapter_guidance": {
+        "emphasis": "Spend weight on claustrophobia, social control, and Mara's competence with physical systems.",
+        "compression": "Keep vault politics readable and immediate; do not over-explain vault history yet.",
+        "word_count_distribution": {
+          "opening": "25%",
+          "middle": "50%",
+          "ending": "25%"
+        }
+      },
+      "tone": [
+        "Claustrophobic",
+        "Uneasy",
+        "Awed at the threshold"
+      ],
+      "characters": [
+        "Mara Vale: 26, maintenance technician, practical, stubborn, raised to distrust the surface.",
+        "Eli Quill: vault archivist and Mara's closest friend, better with old files than confrontation.",
+        "Overseer Sabine Caldera: controlled, paternal, and afraid of losing the vault's obedience."
+      ],
+      "setting": "Vault-Tec Vault 70 beneath the Nevada mountains: algae tanks, cramped maintenance shafts, polished civic murals, failing reactor rooms, and the massive sealed vault door.",
+      "must_include": [
+        "A corrupted Vault-Tec emergency announcement",
+        "The hidden surface telemetry",
+        "A concrete reason New Vegas matters",
+        "Mara leaves with a repair kit, a wrist terminal, and a half-charged sidearm"
+      ],
+      "avoid": [
+        "Do not make Caldera cartoonishly evil.",
+        "Do not reveal the full conspiracy in chapter 1.",
+        "Do not show New Vegas yet."
+      ]
+    },
+    "2": {
+      "purpose": [
+        "Introduce the wasteland as dangerous, beautiful, and more alive than Mara was taught.",
+        "Give Mara her first surface ally while making trust costly."
+      ],
+      "beats": [
+        "Mara suffers through first sunlight, open sky panic, dry air, and the shock of seeing ruined highways stretching farther than any vault corridor.",
+        "She follows the old manifest toward a pre-war service station and nearly dies from drinking from the wrong roadside cistern.",
+        "A ghoul mechanic named Jonah Rusk saves her from a pack of mutated coyotes by using a jury-rigged sonic lure.",
+        "Jonah recognizes the Vault-Tec model number on Mara's wrist terminal and warns that people in the Mojave pay well for sealed-vault coordinates.",
+        "Mara refuses to tell him where Vault 70 is, but trades repair work for directions toward the southern caravan road.",
+        "End with Jonah deciding to travel with her after hearing the words New Vegas and ceramic regulator in the same sentence."
+      ],
+      "target_word_count": 1050,
+      "chapter_guidance": {
+        "emphasis": "Let the sensory contrast between vault life and surface life feel enormous.",
+        "compression": "Keep the creature attack quick and practical, more survival problem than spectacle.",
+        "word_count_distribution": {
+          "opening": "30%",
+          "middle": "45%",
+          "ending": "25%"
+        }
+      },
+      "tone": [
+        "Disorienting",
+        "Dryly funny through Jonah",
+        "Threatening but wonder-filled"
+      ],
+      "characters": [
+        "Mara Vale",
+        "Jonah Rusk: ghoul mechanic, caravan fixer, charming when he is lying and useful when he is not.",
+        "Distant radio voices from settlements Mara did not know existed"
+      ],
+      "setting": "The first miles outside Vault 70: cracked desert, a collapsed frontage road, a rusted service station, rad-weather stains, and a sky too large for Mara to process.",
+      "must_include": [
+        "Mara mistakes at least one normal wasteland custom for a threat.",
+        "Jonah notices something valuable about her vault gear.",
+        "The New Vegas skyline is not visible yet, only talked about as a rumor and destination."
+      ],
+      "avoid": [
+        "Do not turn Jonah into a flawless mentor.",
+        "Do not let Mara adapt too quickly to the surface."
+      ]
+    },
+    "3": {
+      "purpose": [
+        "Move Mara from isolated survival into a social wasteland with barter, rumor, prejudice, and danger.",
+        "Introduce the first antagonist pressure around vault coordinates."
+      ],
+      "beats": [
+        "Mara and Jonah reach Silt Town, a trading post built from dry marina pylons, shipping containers, and old casino billboards.",
+        "Mara's clean vault suit draws attention, mockery, and quiet calculation from traders who know sealed vaults mean clean water and untouched tech.",
+        "She barters repair work on a wind pump for food, maps, and a place to use a patched radio.",
+        "A broker's courier asks too many questions about Vault 70 and mentions that New Vegas families sponsor recovery contracts for unopened shelters.",
+        "A raider scout from the Glass Choir marks Mara's wrist terminal and follows her into the pump house.",
+        "End with Mara disabling the scout using tools instead of marksmanship, then realizing the scout's map already has a rough circle around her home."
+      ],
+      "target_word_count": 1000,
+      "chapter_guidance": {
+        "emphasis": "Build the economy and etiquette of the wasteland through action and trade.",
+        "compression": "Do not linger on every vendor; keep the chapter centered on Mara learning what her vault is worth.",
+        "word_count_distribution": {
+          "opening": "20%",
+          "middle": "55%",
+          "ending": "25%"
+        }
+      },
+      "tone": [
+        "Wary",
+        "Noir western",
+        "First real danger from people"
+      ],
+      "characters": [
+        "Mara Vale",
+        "Jonah Rusk",
+        "Inez Pike: Silt Town wind boss, blunt trader who respects useful hands.",
+        "Glass Choir scout: smiling raider observer with a cracked mirrored mask."
+      ],
+      "setting": "Silt Town, a small Mojave trading post made from salvage, dry docks, solar tarps, and old casino advertisements half-buried in sand.",
+      "must_include": [
+        "A barter scene where Mara's vault skills matter.",
+        "The phrase sealed-vault coordinates used as a dangerous commodity.",
+        "A hint that New Vegas brokers already know Vault 70 exists."
+      ],
+      "avoid": [
+        "Do not make Silt Town only grim; include ordinary routines and humor.",
+        "Do not resolve the broker mystery here."
+      ]
+    },
+    "4": {
+      "purpose": [
+        "Reconnect Mara to Vault 70 and raise the stakes at home.",
+        "Show that the surface journey and the vault crisis are linked by active listeners."
+      ],
+      "beats": [
+        "Jonah leads Mara to a pre-war listening tower on a ridge so she can boost a signal back to Vault 70.",
+        "Mara repairs the tower using parts stripped from a sun-rotted news van while Jonah keeps watch over the dry valley.",
+        "Eli answers through static and reports that Caldera has locked down the lower decks, water rationing has begun, and Mara is being described as missing rather than on mission.",
+        "A second signal cuts into the channel: Ash Halo, leader of the Glass Choir, recites Vault-Tec emergency language that only someone with old company files should know.",
+        "Mara realizes her outgoing signal may have narrowed the search radius for anyone hunting the vault.",
+        "End with Glass Choir flares lighting along the road below the tower."
+      ],
+      "target_word_count": 1000,
+      "chapter_guidance": {
+        "emphasis": "Use radio static, distance, and interrupted trust to make the stakes intimate.",
+        "compression": "Keep technical repair details concrete but not overlong.",
+        "word_count_distribution": {
+          "opening": "20%",
+          "middle": "50%",
+          "ending": "30%"
+        }
+      },
+      "tone": [
+        "Tense",
+        "Lonely",
+        "Paranoid"
+      ],
+      "characters": [
+        "Mara Vale",
+        "Jonah Rusk",
+        "Eli Quill over radio",
+        "Ash Halo: raider preacher and signal scavenger who weaponizes old Vault-Tec language"
+      ],
+      "setting": "A ridge-top listening tower surrounded by dead microwave dishes, an overturned broadcast van, wind-scoured service stairs, and a long view of empty highway.",
+      "must_include": [
+        "Eli confirms worsening conditions in Vault 70.",
+        "Ash Halo interrupts the broadcast.",
+        "Mara worries that trying to save the vault may have exposed it."
+      ],
+      "avoid": [
+        "Do not reveal who gave Ash Halo the Vault-Tec files yet.",
+        "Do not let Mara contact the whole vault, only Eli."
+      ]
+    },
+    "5": {
+      "purpose": [
+        "Force Mara through a serious wasteland loss and make Jonah's secrets matter.",
+        "Turn the road to New Vegas into a chase."
+      ],
+      "beats": [
+        "Mara and Jonah join a salt-road caravan headed toward the outer Vegas settlements because traveling alone is no longer safe.",
+        "Mara begins learning caravan rules: where to walk, how to spot buried cans, when to keep a hand away from a weapon, and how to sleep without trusting sleep.",
+        "The Glass Choir ambushes the caravan in a dry lake bed using reflected light, old emergency sirens, and fake distress calls.",
+        "Jonah reveals he once guided prospectors to sealed shelters and that one bad job left an entire settlement dead.",
+        "Mara saves trapped caravan children by rerouting power through a dead truck winch, but the raiders steal part of her map data.",
+        "End with Jonah admitting that a New Vegas broker named Vega Sloane paid him years ago for rumors about Vault 70."
+      ],
+      "target_word_count": 1100,
+      "chapter_guidance": {
+        "emphasis": "Balance action with the emotional blow of Jonah's confession.",
+        "compression": "Keep raider tactics clear; avoid extended battle choreography.",
+        "word_count_distribution": {
+          "opening": "25%",
+          "middle": "50%",
+          "ending": "25%"
+        }
+      },
+      "tone": [
+        "Urgent",
+        "Dusty",
+        "Betrayed"
+      ],
+      "characters": [
+        "Mara Vale",
+        "Jonah Rusk",
+        "Caravan families and guards",
+        "Glass Choir raiders"
+      ],
+      "setting": "The salt road across a dry lake bed: white glare, buried wrecks, canvas wagons, brahmin teams, and blinding mirrored raider signals.",
+      "must_include": [
+        "A non-lethal engineering solution from Mara under pressure.",
+        "Jonah's connection to Vega Sloane.",
+        "The raiders obtain enough map data to remain a threat."
+      ],
+      "avoid": [
+        "Do not fully forgive Jonah in the same chapter.",
+        "Do not let Mara become an expert gunfighter."
+      ]
+    },
+    "6": {
+      "purpose": [
+        "Complicate the New Vegas objective by showing that the city can solve Mara's problem and exploit it.",
+        "Give Mara a moral test before she reaches the Strip."
+      ],
+      "beats": [
+        "The damaged caravan limps into the outer settlement of Neon Boneyard, where the glow of New Vegas is finally visible beyond ruined suburbs.",
+        "A medic offers Mara a clean filter cartridge in exchange for a scan of her vault's purifier architecture.",
+        "Mara learns that the ceramic regulator she needs may be stored in a closed Vault-Tec promotional exhibit beneath a New Vegas casino.",
+        "Vega Sloane's envoy arrives with a polished contract: safe passage and the regulator for Vault 70's location and future water rights.",
+        "Mara refuses, but discovers Sloane already has enough information to send survey teams toward the mountains.",
+        "End with Mara choosing to enter New Vegas without a deal, even though it means crossing territory where Jonah's old debts can get them killed."
+      ],
+      "target_word_count": 1000,
+      "chapter_guidance": {
+        "emphasis": "Make New Vegas feel close, seductive, and predatory before the characters enter it.",
+        "compression": "Keep contract details sharp and concrete.",
+        "word_count_distribution": {
+          "opening": "20%",
+          "middle": "55%",
+          "ending": "25%"
+        }
+      },
+      "tone": [
+        "Tempting",
+        "Uneasy",
+        "Political"
+      ],
+      "characters": [
+        "Mara Vale",
+        "Jonah Rusk",
+        "Vega Sloane's envoy",
+        "Neon Boneyard medics and fixers"
+      ],
+      "setting": "Neon Boneyard, an outer Vegas settlement of broken suburbs, glow-sign scrap, clinic tents, battery markets, and the distant neon line of New Vegas.",
+      "must_include": [
+        "First visible glimpse of New Vegas",
+        "Sloane's contract offer",
+        "Confirmation that the regulator exists under a casino"
+      ],
+      "avoid": [
+        "Do not have Mara accept a simple bargain.",
+        "Do not enter the Strip until the next chapter."
+      ]
+    },
+    "7": {
+      "purpose": [
+        "Deliver the arrival at New Vegas and shift the genre into neon noir.",
+        "Set up the heist for the regulator while making the city feel like a character."
+      ],
+      "beats": [
+        "Mara and Jonah pass through New Vegas entry checks where caps, favors, weapons, and names all matter more than citizenship.",
+        "Mara is overwhelmed by working lights, clean liquor, music, gambling floors, and people pretending the apocalypse is a dress code.",
+        "Jonah's old debt brings them to Vega Sloane, an elegant information broker who treats lives as collateral and history as inventory.",
+        "Sloane offers one last bargain, then quietly threatens Eli by playing a recording of the tower broadcast.",
+        "Mara spots a sealed service route into the casino's old Vault-Tec exhibit and realizes she can steal the regulator instead of trading for it.",
+        "End with Mara and Jonah standing above the service hatch while casino guards search for them one floor up."
+      ],
+      "target_word_count": 1150,
+      "chapter_guidance": {
+        "emphasis": "Make Mara's arrival at New Vegas vivid, disorienting, and morally sour under the glamour.",
+        "compression": "Keep casino layout understandable; focus on the path to the exhibit.",
+        "word_count_distribution": {
+          "opening": "30%",
+          "middle": "45%",
+          "ending": "25%"
+        }
+      },
+      "tone": [
+        "Neon noir",
+        "Seductive",
+        "Cornered"
+      ],
+      "characters": [
+        "Mara Vale",
+        "Jonah Rusk",
+        "Vega Sloane: New Vegas broker, immaculate, patient, and always collecting leverage.",
+        "Casino guards, gamblers, debt clerks, and performers"
+      ],
+      "setting": "New Vegas: outer checkpoints, humming signs, casino floors, service corridors, old resort architecture, and a sealed Vault-Tec exhibit beneath the glamour.",
+      "must_include": [
+        "A strong first-viewport-style arrival moment for New Vegas in prose terms",
+        "Sloane uses Eli's broadcast as leverage.",
+        "Mara chooses theft over surrendering Vault 70."
+      ],
+      "avoid": [
+        "Do not use canon Fallout main characters.",
+        "Do not make New Vegas only villainous; include its genuine energy and allure."
+      ]
+    },
+    "8": {
+      "purpose": [
+        "Reveal the deeper Vault-Tec secret and let Mara obtain the regulator at a cost.",
+        "Turn the quest from retrieval into a fight over who controls the vault's future."
+      ],
+      "beats": [
+        "Mara and Jonah descend into the abandoned Vault-Tec exhibit, where cheerful pre-war displays explain shelter life as a consumer dream.",
+        "Mara finds the ceramic regulator in a demonstration purifier and removes it while keeping the exhibit's failing security system alive.",
+        "A hidden archive terminal reveals Vault 70 was designed to test long-term obedience through staged scarcity and censored surface data.",
+        "The files show Caldera inherited the lie, but Sloane triggered the recent reactor instability by buying access to an old Vault-Tec maintenance channel.",
+        "Sloane's guards breach the exhibit; Jonah stays behind to stall them and is captured.",
+        "End with Mara escaping into a service tunnel with the regulator and proof, but Sloane now has a clean path to sell Vault 70's location."
+      ],
+      "target_word_count": 1100,
+      "chapter_guidance": {
+        "emphasis": "Let the old exhibit's cheerful propaganda clash with the horror of what Vault 70 endured.",
+        "compression": "Make the archive reveal clear in a few powerful details rather than a long data dump.",
+        "word_count_distribution": {
+          "opening": "20%",
+          "middle": "55%",
+          "ending": "25%"
+        }
+      },
+      "tone": [
+        "Eerie",
+        "Revelatory",
+        "Fast under pressure"
+      ],
+      "characters": [
+        "Mara Vale",
+        "Jonah Rusk",
+        "Vega Sloane's guards",
+        "Archived Vault-Tec training footage and terminal logs"
+      ],
+      "setting": "The buried Vault-Tec exhibit beneath a New Vegas casino: smiling mannequins, dead demo kitchens, mock vault apartments, glass purifier displays, and service tunnels.",
+      "must_include": [
+        "The ceramic regulator",
+        "The truth about Vault 70's obedience experiment",
+        "Evidence that Sloane triggered the current crisis",
+        "Jonah captured while buying Mara time"
+      ],
+      "avoid": [
+        "Do not make the reveal depend on a single convenient note.",
+        "Do not resolve Jonah's fate yet."
+      ]
+    },
+    "9": {
+      "purpose": [
+        "Force Mara to use New Vegas's own systems against Sloane.",
+        "Make her choose public truth over a private escape."
+      ],
+      "beats": [
+        "Mara hides in New Vegas service infrastructure while Sloane announces a private auction for Vault 70's water rights, coordinates, and population labor contracts.",
+        "Eli reaches Mara through a narrow radio window and says Caldera is preparing to seal the vault permanently if Mara does not return before the purifier fails.",
+        "Mara recruits help from Neon Boneyard fixers and caravan survivors by offering the proof that Sloane sabotaged a sealed vault for profit.",
+        "She breaks into a casino broadcast booth and splices the Vault-Tec archive, Sloane's contract audio, and her own warning onto the Strip's advertising network.",
+        "Sloane tries to trade Jonah's life for the regulator, but Jonah publicly names every shelter deal he helped enable.",
+        "End with New Vegas lights flickering as the broadcast turns the auction into a riot and Mara runs for the east gate with Sloane's hunters behind her."
+      ],
+      "target_word_count": 1050,
+      "chapter_guidance": {
+        "emphasis": "Use public exposure as the action climax rather than a simple gunfight.",
+        "compression": "Keep the coalition-building swift and grounded in debts from earlier chapters.",
+        "word_count_distribution": {
+          "opening": "20%",
+          "middle": "55%",
+          "ending": "25%"
+        }
+      },
+      "tone": [
+        "Defiant",
+        "Chaotic",
+        "High-stakes"
+      ],
+      "characters": [
+        "Mara Vale",
+        "Jonah Rusk",
+        "Vega Sloane",
+        "Eli Quill over radio",
+        "Caravan survivors and Neon Boneyard fixers"
+      ],
+      "setting": "New Vegas back corridors, broadcast rooms, advertising towers, crowded casino floors, and the east gate during a sudden political panic.",
+      "must_include": [
+        "The auction of Vault 70's future",
+        "Mara's public broadcast",
+        "Jonah taking responsibility for his past",
+        "A chase out of New Vegas"
+      ],
+      "avoid": [
+        "Do not have New Vegas instantly become noble.",
+        "Do not kill Sloane unless the ending still preserves larger civic consequences."
+      ]
+    },
+    "10": {
+      "purpose": [
+        "Resolve the vault crisis while leaving the world open for future journeys.",
+        "Complete Mara's transformation from sheltered technician to chosen scout and negotiator."
+      ],
+      "beats": [
+        "Mara, Jonah, and a patched-together caravan race back toward Vault 70 with the regulator while Sloane's hired hunters and Glass Choir remnants converge on the mountain road.",
+        "At the vault entrance, Caldera refuses to open until Mara broadcasts the Vault-Tec archive and lets the residents hear the truth for themselves.",
+        "Mara installs the regulator during a failing power cycle, with Eli coordinating from inside and Jonah defending the corridor outside.",
+        "Caldera breaks down not because she wanted power for its own sake, but because she cannot imagine the vault surviving freedom.",
+        "The residents vote to open controlled trade with the surface instead of surrendering to New Vegas brokers or sealing themselves away.",
+        "Close with Mara returning to the ridge at dawn, seeing New Vegas glow in the distance, and choosing to become Vault 70's first official road scout."
+      ],
+      "target_word_count": 1150,
+      "chapter_guidance": {
+        "emphasis": "Give the ending emotional weight through choice, repair, and community consequence.",
+        "compression": "Keep the final attack secondary to the vault's decision about its future.",
+        "word_count_distribution": {
+          "opening": "25%",
+          "middle": "50%",
+          "ending": "25%"
+        }
+      },
+      "tone": [
+        "Urgent",
+        "Cathartic",
+        "Open-ended hope"
+      ],
+      "characters": [
+        "Mara Vale",
+        "Jonah Rusk",
+        "Eli Quill",
+        "Overseer Sabine Caldera",
+        "Vault 70 residents",
+        "Sloane's hunters and Glass Choir remnants"
+      ],
+      "setting": "The mountain road back to Vault 70, the exposed vault entrance, failing purifier machinery, crowded civic decks, and the dawn ridge facing New Vegas.",
+      "must_include": [
+        "The regulator is installed under pressure.",
+        "Vault 70 hears the truth before choosing its future.",
+        "Mara does not simply return to her old life.",
+        "The final image links Vault 70 and New Vegas as an ongoing road."
+      ],
+      "avoid": [
+        "Do not make every faction fully defeated or redeemed.",
+        "Do not erase the difficulty of opening the vault to the surface."
+      ]
+    }
+  },
+  "prompt_sections": {
+    "premise": [
+      "Write a Fallout-inspired post-nuclear adventure about Mara Vale, a young maintenance technician raised inside Vault-Tec Vault 70, who leaves after a reactor and water-purifier crisis exposes that the surface was never as dead as she was taught.",
+      "Her journey takes her across the Mojave toward New Vegas, where a replacement Vault-Tec regulator may save her home, but every mile teaches her that a sealed vault is treasure, leverage, and prey."
+    ],
+    "storylines": "Road survival line: Mara learns the wasteland through thirst, barter, radiation, weather, scavenged machinery, and dangerous human attention.\nVault mystery line: Vault 70's crisis is tied to old Vault-Tec social-control systems and a present-day sabotage scheme.\nNew Vegas line: the city is glamorous, predatory, useful, and morally complicated; it can save the vault or sell it piece by piece.\nTrust line: Jonah Rusk becomes Mara's guide, but his history with sealed shelters and New Vegas brokers makes every kindness suspect.\nHomecoming line: Mara must return with more than a part; she must bring the truth and convince the vault to choose its own future.",
+    "setting": "A Fallout-inspired Mojave wasteland with original characters and local conflicts: Vault-Tec Vault 70 under the Nevada mountains, cracked highways, dry lake beds, small salvage towns, radio towers, caravan roads, outer Vegas settlements, and the neon machinery of New Vegas. Use familiar retrofuturist post-nuclear textures such as Vault-Tec propaganda, salvage engineering, caps-and-barter economics, radiation hazards, ruined pre-war consumer culture, and casino politics, while avoiding reliance on canon game plots or canon major characters.",
+    "characters": [
+      "Mara Vale: 26, Vault 70 maintenance technician, precise with machinery, socially naive outside the vault, brave in practical ways, and slow to trust simple answers.",
+      "Jonah Rusk: ghoul mechanic and caravan fixer, old enough to remember pieces of the before-times, useful under pressure, funny when cornered, and guilty over past work selling shelter rumors.",
+      "Eli Quill: Vault 70 archivist, Mara's friend and radio lifeline, physically stuck inside but crucial for decoding Vault-Tec records.",
+      "Overseer Sabine Caldera: controlled and protective, an inheritor of Vault-Tec lies who believes order matters more than truth.",
+      "Vega Sloane: New Vegas information broker who trades in debts, coordinates, water rights, and old-world documents.",
+      "Ash Halo: leader of the Glass Choir, a raider signal-prophet who uses corrupted emergency broadcasts and Vault-Tec language to terrify targets.",
+      "Inez Pike: Silt Town wind boss and trader, pragmatic, suspicious of vault folk, and more ethical than she first appears."
+    ],
+    "writing_style": "Third-person limited through Mara. Use sharp, sensory prose with a noir western edge and occasional dry wasteland humor. Ground the adventure in concrete systems: vault maintenance, filters, jury-rigged radios, barter math, batteries, radiation, map fragments, casino security, and old terminals. Keep exposition embedded in action and dialogue. Mara should be capable because of training and persistence, not because she instantly becomes a wasteland legend.",
+    "tone": [
+      "Tense and adventurous",
+      "Retrofuturist and weathered",
+      "Morally gray without becoming hopeless",
+      "Wonder-struck whenever Mara confronts the open sky, living settlements, or New Vegas neon"
+    ],
+    "plot_beats": [
+      "Vault 70 suffers a reactor and water-purifier crisis.",
+      "Mara discovers evidence that the overseer's surface story is false.",
+      "Mara exits the vault with a repair mission tied to New Vegas.",
+      "The wasteland challenges her assumptions through thirst, trade, radiation, and violence.",
+      "Jonah Rusk guides her while hiding his connection to New Vegas shelter brokers.",
+      "The Glass Choir hunts Mara for her vault data.",
+      "Mara reaches the outer settlements and sees New Vegas for the first time.",
+      "Inside New Vegas, she discovers a Vault-Tec regulator and the truth about Vault 70's social-control experiment.",
+      "Mara exposes Sloane's sabotage and turns New Vegas's broadcast machinery against the broker.",
+      "Mara returns to Vault 70, repairs the purifier, reveals the truth, and helps the residents choose an open but dangerous future."
+    ],
+    "constraints": "Keep the book at exactly 10 chapters for this config.\nUse original central characters and an original vault while allowing Fallout-inspired setting texture, Vault-Tec references, and New Vegas as the destination.\nDo not use canon Fallout protagonists, main quests, or major canon faction leaders as plot drivers.\nRespect every chapter's required beats, purpose, must-include items, avoid notes, and target word count.\nMaintain cause-and-effect continuity from chapter to chapter; do not move chapter-specific events into other chapters.\nKeep technology tactile and plausible within the retrofuturist wasteland: repairs require parts, time, risk, and tradeoffs.\nAvoid magic hacking, instant mastery, cartoon villains, and consequence-free violence.\nEnd with resolution for Vault 70 and Mara's first journey, while leaving the road between the vault and New Vegas open for future stories."
+  }
+}

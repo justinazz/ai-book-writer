@@ -214,25 +214,6 @@
     return { view: "outline", chapterNumber: 0 };
   }
 
-  function livePhaseState(state) {
-    if (state.latest_error || state.status === "failed") {
-      return { tone: "error", label: "Error" };
-    }
-    if (state.waiting_for_input || state.awaiting_outline_approval || state.status === "waiting") {
-      return { tone: "waiting", label: "Waiting" };
-    }
-    if (state.stop_requested && state.run_active) {
-      return { tone: "idle", label: "Pause pending" };
-    }
-    if (state.run_active) {
-      return { tone: "generating", label: "Generating" };
-    }
-    if (state.resume_available || state.status === "stopped") {
-      return { tone: "idle", label: "Paused" };
-    }
-    return { tone: "idle", label: "Idle" };
-  }
-
   function setActiveTab(name, userInitiated = false) {
     if (!name) return;
     activeTab = name;
@@ -280,27 +261,6 @@
       gain.connect(ctx.destination);
       oscillator.start();
       oscillator.stop(ctx.currentTime + 0.18);
-    } catch (_error) {
-    }
-  }
-
-  function playCompleteCue() {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const now = ctx.currentTime;
-      [660, 880].forEach((freq, index) => {
-        const oscillator = ctx.createOscillator();
-        const gain = ctx.createGain();
-        oscillator.type = "sine";
-        oscillator.frequency.setValueAtTime(freq, now + index * 0.11);
-        gain.gain.setValueAtTime(0.0001, now + index * 0.11);
-        gain.gain.exponentialRampToValueAtTime(0.09, now + index * 0.11 + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + index * 0.11 + 0.24);
-        oscillator.connect(gain);
-        gain.connect(ctx.destination);
-        oscillator.start(now + index * 0.11);
-        oscillator.stop(now + index * 0.11 + 0.24);
-      });
     } catch (_error) {
     }
   }
@@ -504,6 +464,13 @@
       .filter(Boolean);
   }
 
+  function normalizeFlexibleText(value) {
+    if (Array.isArray(value)) {
+      return value.map((item) => String(item ?? "").trim()).filter(Boolean).join("\n");
+    }
+    return String(value ?? "").trim();
+  }
+
   function setChapterDetailValue(detail, path, value) {
     const parts = String(path || "").split(".").filter(Boolean);
     if (!parts.length) return;
@@ -524,7 +491,7 @@
     const source = detail && typeof detail === "object" ? detail : {};
     const cleaned = {};
     ["purpose", "beats", "tone", "characters", "setting"].forEach((key) => {
-      const text = String(source[key] ?? "").trim();
+      const text = normalizeFlexibleText(source[key]);
       if (text) cleaned[key] = text;
     });
     const targetWordCount = Number(source.target_word_count || 0);
@@ -941,6 +908,58 @@
     byId("context-mode-label").textContent = state.mode_label || "";
   }
 
+  function renderMonitor(state) {
+    const inputPanel = byId("latest-llm-input");
+    const outputPanel = byId("latest-llm-output");
+    if (inputPanel) inputPanel.textContent = state.latest_llm_input || "No LLM input captured yet.";
+    if (outputPanel) outputPanel.textContent = state.latest_llm_output || "No LLM output captured yet.";
+    const inputLabel = byId("latest-llm-input-label");
+    const outputLabel = byId("latest-llm-output-label");
+    if (inputLabel) inputLabel.textContent = state.latest_llm_input_label || "Waiting for first LLM call";
+    if (outputLabel) outputLabel.textContent = state.latest_llm_output_label || "Waiting for first LLM response";
+    const updatedAt = state.latest_llm_updated_at || "Not updated yet";
+    const inputUpdated = byId("latest-llm-input-updated");
+    const outputUpdated = byId("latest-llm-output-updated");
+    if (inputUpdated) inputUpdated.textContent = updatedAt;
+    if (outputUpdated) outputUpdated.textContent = updatedAt;
+  }
+
+  async function copyTextFromElement(elementId, button) {
+    const element = byId(elementId);
+    if (!element) return;
+    const text = element.textContent || "";
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const scratch = document.createElement("textarea");
+        scratch.value = text;
+        scratch.setAttribute("readonly", "readonly");
+        scratch.style.position = "fixed";
+        scratch.style.left = "-9999px";
+        document.body.appendChild(scratch);
+        scratch.select();
+        document.execCommand("copy");
+        scratch.remove();
+      }
+      const originalText = button.textContent;
+      button.textContent = "Copied";
+      window.setTimeout(() => {
+        button.textContent = originalText;
+      }, 1200);
+    } catch (_error) {
+      showAsyncError("Copy failed. Select the panel text and copy it manually.");
+    }
+  }
+
+  function bindMonitorCopyButtons() {
+    document.querySelectorAll("[data-copy-target]").forEach((button) => {
+      if (button.dataset.copyBound === "true") return;
+      button.dataset.copyBound = "true";
+      button.addEventListener("click", () => copyTextFromElement(button.dataset.copyTarget || "", button));
+    });
+  }
+
   function applyState(state) {
     lastKnownState = state;
     const waitingText = state.waiting_for_input ? "Yes" : "No";
@@ -1009,6 +1028,7 @@
     byId("progress-detail").textContent = state.progress?.detail || "No active detail yet.";
     byId("progress-events").textContent = state.progress_events || "No progress events yet.";
     byId("continuity-panel").textContent = state.continuity || "No continuity data yet.";
+    renderMonitor(state);
 
     renderChapterList(state);
     renderSelectedChapter(state);
@@ -1133,6 +1153,7 @@
   bindSectionLinks();
   bindEditableFields();
   ensureTextareaExpandButtons();
+  bindMonitorCopyButtons();
   bindAsyncForms();
 
   byId("token_limit_enabled")?.addEventListener("change", (event) => {
