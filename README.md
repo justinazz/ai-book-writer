@@ -18,7 +18,7 @@ The UI is designed so you can steer the process at checkpoints instead of runnin
 venv\Scripts\python.exe web_ui.py
 ```
 
-3. Open `http://127.0.0.1:8000`
+3. Open `http://127.0.0.1:8001`
 
 On Windows you can also use:
 

@@ -44,6 +44,8 @@ DEFAULT_SECTIONS = PromptSections(
     constraints="Use intersecting storylines. Keep the corporate and financial details grounded in reality. Maintain tension around whether the prediction is an error.\r\nAround 1000 words per chapter.",
 )
 
+DEFAULT_OVERALL_WORD_COUNT_ADVICE = ""
+
 
 def _load_external_config_payload(body: str) -> Dict:
     candidates = [body, body.lstrip("\ufeff")]
@@ -1276,6 +1278,18 @@ def _prepare_page_context(snapshot) -> Dict[str, object]:
         else None
     )
     selected_review = snapshot.chapter_reviews.get(selected_number) if selected_reader_view == "chapter" else None
+    tool_chapter_number = selected_number or snapshot.current_chapter or 1
+    selected_detail = (
+        snapshot.chapter_details.get(tool_chapter_number)
+        or snapshot.chapter_details.get(str(tool_chapter_number), {})
+        or {}
+    )
+    selected_tool_review = snapshot.chapter_reviews.get(tool_chapter_number)
+    selected_improvement_notes = (
+        selected_tool_review.improvement_notes
+        if selected_tool_review and selected_tool_review.improvement_notes
+        else "No advice submitted yet for this chapter."
+    )
     chapter_items = _render_outline_item(snapshot, selected_reader_view == "outline")
     chapter_items += (
         "".join(
@@ -1305,6 +1319,7 @@ def _prepare_page_context(snapshot) -> Dict[str, object]:
         "banner": banner,
         "outline_status_text": outline_status_text,
         "selected_chapter_number": selected_number,
+        "tool_chapter_number": tool_chapter_number,
         "selected_reader_view": selected_reader_view,
         "selected_chapter_title": (
             "Outline"
@@ -1334,12 +1349,15 @@ def _prepare_page_context(snapshot) -> Dict[str, object]:
             if selected_reader_view == "outline"
             else _render_artifacts(selected_review)
         ),
+        "selected_chapter_detail": selected_detail,
+        "selected_chapter_improvement_notes": selected_improvement_notes,
         "chapter_items": chapter_items,
         "outline_text": snapshot.outline_text or "Outline not generated yet.",
         "checkpoint_body": snapshot.current_checkpoint_body or "Nothing to review yet.",
         "models": _render_options(unique_models, snapshot.outline_model),
         "writer_models": _render_options(unique_models, snapshot.writer_model),
         "sections": snapshot.prompt_sections if snapshot.prompt_sections.premise else DEFAULT_SECTIONS,
+        "overall_word_count_advice": snapshot.overall_word_count_advice or DEFAULT_OVERALL_WORD_COUNT_ADVICE,
         "chapter_details": snapshot.chapter_details or {},
         "model_error": snapshot.model_fetch_error or "No model errors.",
         "saved_configs": _render_saved_config_options(snapshot.saved_configs),
@@ -1525,6 +1543,10 @@ def _render_planning_tab(context: Dict[str, object]) -> str:
                   <input id="chapter_target_word_count" type="number" min="0" max="50000" name="chapter_target_word_count" value="{snapshot.chapter_target_word_count}">
                 </div>
               </div>
+              <div class="field-stack" style="margin-top: 16px;">
+                <label class="label" for="overall_word_count_advice">Overall Word Count Advice</label>
+                <textarea id="overall_word_count_advice" name="overall_word_count_advice">{escape(str(context["overall_word_count_advice"]))}</textarea>
+              </div>
               <div class="chapter-editor-shell">
                 <div class="subheading">Chapter details</div>
                 <div id="chapter-details-editor">
@@ -1679,26 +1701,15 @@ def _render_writing_tab(context: Dict[str, object]) -> str:
             <section class="workspace-card">
               <div class="eyebrow">Intervention</div>
               <h2>Chapter Tools</h2>
-              <form method="post" action="/chapter-advice" class="async-form">
-                <label class="label" for="chapter_advice_number">Chapter Number</label>
-                <input id="chapter_advice_number" type="number" min="1" name="chapter_number" value="{context["selected_chapter_number"] or snapshot.current_chapter or 1}">
-                <label class="label" for="advice">Replacement beats for the next attempt</label>
-                <textarea class="advice-box" id="advice" name="advice" placeholder="Example: 1. He stalls at the threshold. 2. She notices the blood on his cuff. 3. Their argument expands into the hidden ledger reveal."></textarea>
-                <label class="label" for="chapter_advice_target_word_count">Optional replacement target word count</label>
-                <input id="chapter_advice_target_word_count" type="number" min="0" max="50000" name="target_word_count" value="">
-                <div class="controls chapter-action">
-                  <button id="chapter-advice-button" {"disabled" if not context["can_queue_chapter_advice"] else ""}>&#10148; Queue Chapter Advice</button>
-                </div>
-              </form>
-              <form method="post" action="/regenerate-chapter" class="async-form">
-                <label class="label" for="regen_chapter_number">Regenerate Chapter</label>
-                <input id="regen_chapter_number" type="number" min="1" name="chapter_number" value="{context["selected_chapter_number"] or snapshot.current_chapter or 1}">
-                <div class="controls chapter-action">
-                  <button id="regen-chapter-button" {"disabled" if not context["can_regenerate_chapter"] else ""}>&#8635; Regenerate Chapter</button>
-                </div>
-              </form>
+              {_render_chapter_tool_inputs(
+                  context["tool_chapter_number"],
+                  context["selected_chapter_detail"],
+                  snapshot.total_chapters or snapshot.num_chapters or 1,
+                  context["can_queue_chapter_advice"],
+                  context["can_regenerate_chapter"],
+              )}
               <div class="subheading">Last queued advice</div>
-              <pre id="last-advice">{escape(snapshot.latest_advice or "No advice submitted yet.")}</pre>
+              <pre id="last-advice">{escape(str(context["selected_chapter_improvement_notes"]))}</pre>
             </section>
 
             <section class="workspace-card">
@@ -1819,16 +1830,7 @@ class BookUIHandler(BaseHTTPRequestHandler):
         if path == "/start":
             num_chapters = int(_first(form, "num_chapters", "10") or "10")
             chapter_details = _extract_chapter_details(form, num_chapters)
-            sections = PromptSections(
-                premise=_first(form, "premise", DEFAULT_SECTIONS.premise),
-                storylines=_first(form, "storylines", DEFAULT_SECTIONS.storylines),
-                setting=_first(form, "setting", DEFAULT_SECTIONS.setting),
-                characters=_first(form, "characters", DEFAULT_SECTIONS.characters),
-                writing_style=_first(form, "writing_style", DEFAULT_SECTIONS.writing_style),
-                tone=_first(form, "tone", DEFAULT_SECTIONS.tone),
-                plot_beats=_first(form, "plot_beats", DEFAULT_SECTIONS.plot_beats),
-                constraints=_first(form, "constraints", DEFAULT_SECTIONS.constraints),
-            )
+            sections = _prompt_sections_from_form(form)
             controller.start_run(
                 sections,
                 chapter_details,
@@ -1841,23 +1843,18 @@ class BookUIHandler(BaseHTTPRequestHandler):
                 _first(form, "reduce_thinking", "off") == "on",
                 int(_first(form, "max_iterations", "5") or "5"),
                 int(_first(form, "chapter_target_word_count", "0") or "0"),
+                _first(form, "overall_word_count_advice", DEFAULT_OVERALL_WORD_COUNT_ADVICE),
             )
+        elif path == "/update-runtime-settings":
+            _apply_runtime_settings_from_form(form)
         elif path == "/refresh-models":
             controller.refresh_models(_first(form, "endpoint_url", ""))
         elif path == "/save-config":
+            _apply_runtime_settings_from_form(form)
             if "premise" in form or "num_chapters" in form:
                 num_chapters = int(_first(form, "num_chapters", "10") or "10")
                 chapter_details = _extract_chapter_details(form, num_chapters)
-                sections = PromptSections(
-                    premise=_first(form, "premise", DEFAULT_SECTIONS.premise),
-                    storylines=_first(form, "storylines", DEFAULT_SECTIONS.storylines),
-                    setting=_first(form, "setting", DEFAULT_SECTIONS.setting),
-                    characters=_first(form, "characters", DEFAULT_SECTIONS.characters),
-                    writing_style=_first(form, "writing_style", DEFAULT_SECTIONS.writing_style),
-                    tone=_first(form, "tone", DEFAULT_SECTIONS.tone),
-                    plot_beats=_first(form, "plot_beats", DEFAULT_SECTIONS.plot_beats),
-                    constraints=_first(form, "constraints", DEFAULT_SECTIONS.constraints),
-                )
+                sections = _prompt_sections_from_form(form)
                 controller.save_config_data(
                     _first(form, "config_name", ""),
                     sections,
@@ -1871,6 +1868,7 @@ class BookUIHandler(BaseHTTPRequestHandler):
                     _first(form, "reduce_thinking", "off") == "on",
                     int(_first(form, "max_iterations", "5") or "5"),
                     int(_first(form, "chapter_target_word_count", "0") or "0"),
+                    _first(form, "overall_word_count_advice", DEFAULT_OVERALL_WORD_COUNT_ADVICE),
                 )
             else:
                 controller.save_config(_first(form, "config_name", ""))
@@ -1897,33 +1895,57 @@ class BookUIHandler(BaseHTTPRequestHandler):
         elif path == "/outline-feedback":
             controller.set_outline_feedback(_first(form, "outline_feedback", ""))
         elif path == "/approve-outline":
+            _apply_runtime_settings_from_form(form)
             controller.approve_outline()
         elif path == "/regenerate-outline":
+            _apply_runtime_settings_from_form(form)
             controller.set_outline_feedback(_first(form, "outline_feedback", ""))
             controller.regenerate_outline()
         elif path == "/mode":
+            _apply_runtime_settings_from_form(form)
             controller.set_mode(_first(form, "mode", "keep_going"))
         elif path == "/continue":
+            _apply_runtime_settings_from_form(form)
             controller.continue_run()
         elif path in {"/advice", "/chapter-advice"}:
+            _apply_runtime_settings_from_form(form)
             snapshot = controller.get_snapshot()
             chapter_number_raw = _first(form, "chapter_number", str(snapshot.current_chapter or 1))
             try:
                 chapter_number = int(chapter_number_raw or str(snapshot.current_chapter or 1))
             except ValueError:
                 chapter_number = snapshot.current_chapter or 1
-            target_word_count_raw = _first(form, "target_word_count", "").strip()
-            try:
-                target_word_count = int(target_word_count_raw) if target_word_count_raw else None
-            except ValueError:
-                target_word_count = None
+            chapter_detail, has_structured_fields = _extract_chapter_tool_detail(form)
             controller.submit_chapter_advice(
                 chapter_number,
-                _first(form, "advice", ""),
-                target_word_count,
+                chapter_detail,
+                replace_existing=has_structured_fields,
             )
         elif path == "/regenerate-chapter":
-            started = controller.regenerate_chapter(int(_first(form, "chapter_number", "1") or "1"))
+            _apply_runtime_settings_from_form(form)
+            if "premise" in form or "chapter_detail_beats_1" in form or "overall_word_count_advice" in form:
+                snapshot = controller.get_snapshot()
+                detail_count = int(snapshot.total_chapters or snapshot.num_chapters or 1)
+                controller.update_runtime_planning(
+                    _prompt_sections_from_form(form),
+                    _extract_chapter_details(form, detail_count),
+                    int(_first(form, "chapter_target_word_count", str(snapshot.chapter_target_word_count or 0)) or "0"),
+                    _first(form, "overall_word_count_advice", snapshot.overall_word_count_advice or DEFAULT_OVERALL_WORD_COUNT_ADVICE),
+                )
+            chapter_detail, has_structured_fields = _extract_chapter_tool_detail(form)
+            chapter_number_raw = _first(form, "chapter_number", "1")
+            try:
+                chapter_number = int(chapter_number_raw or "1")
+            except ValueError:
+                chapter_number = 1
+            if has_structured_fields:
+                controller.submit_chapter_advice(
+                    chapter_number,
+                    chapter_detail,
+                    replace_existing=True,
+                    resume_if_keep_going=False,
+                )
+            started = controller.regenerate_chapter(chapter_number)
             if not started:
                 message = controller.get_snapshot().latest_error or "Unable to regenerate that chapter right now."
                 if is_async:
@@ -2042,6 +2064,7 @@ def _snapshot_payload(snapshot):
             "reduce_thinking": snapshot.reduce_thinking,
             "max_iterations": snapshot.max_iterations,
             "chapter_target_word_count": snapshot.chapter_target_word_count,
+            "overall_word_count_advice": snapshot.overall_word_count_advice,
             "output_folder": snapshot.output_folder,
             "config_name": snapshot.config_name,
             "chapter_details": {str(key): value for key, value in snapshot.chapter_details.items()},
@@ -2057,6 +2080,7 @@ def _snapshot_payload(snapshot):
                     "status": chapter.status,
                     "saved_text": snapshot.chapter_reviews.get(chapter.number).saved_text if snapshot.chapter_reviews.get(chapter.number) else "",
                     "artifacts_text": _render_artifacts(snapshot.chapter_reviews.get(chapter.number)),
+                    "improvement_notes": snapshot.chapter_reviews.get(chapter.number).improvement_notes if snapshot.chapter_reviews.get(chapter.number) else "",
                 }
                 for chapter in snapshot.chapters
             ],
@@ -2070,20 +2094,200 @@ def _first(form: Dict[str, list], key: str, default: str) -> str:
     return values[0]
 
 
+def _optional_int(form: Dict[str, list], key: str) -> int | None:
+    if key not in form:
+        return None
+    try:
+        return int(_first(form, key, "0") or "0")
+    except ValueError:
+        return None
+
+
+def _apply_runtime_settings_from_form(form: Dict[str, list]) -> None:
+    runtime_field_names = {
+        "endpoint_url",
+        "outline_model",
+        "writer_model",
+        "token_limit_enabled",
+        "max_tokens",
+        "reduce_thinking",
+        "max_iterations",
+    }
+    if not any(name in form for name in runtime_field_names):
+        return
+    controller.update_runtime_settings(
+        endpoint_url=_first(form, "endpoint_url", "") if "endpoint_url" in form else None,
+        outline_model=_first(form, "outline_model", "") if "outline_model" in form else None,
+        writer_model=_first(form, "writer_model", "") if "writer_model" in form else None,
+        token_limit_enabled=(_first(form, "token_limit_enabled", "off") == "on")
+        if "token_limit_enabled" in form else None,
+        max_tokens=_optional_int(form, "max_tokens"),
+        reduce_thinking=(_first(form, "reduce_thinking", "off") == "on")
+        if "reduce_thinking" in form else None,
+        max_iterations=_optional_int(form, "max_iterations"),
+    )
+
+
+def _prompt_sections_from_form(form: Dict[str, list]) -> PromptSections:
+    return PromptSections(
+        premise=_first(form, "premise", DEFAULT_SECTIONS.premise),
+        storylines=_first(form, "storylines", DEFAULT_SECTIONS.storylines),
+        setting=_first(form, "setting", DEFAULT_SECTIONS.setting),
+        characters=_first(form, "characters", DEFAULT_SECTIONS.characters),
+        writing_style=_first(form, "writing_style", DEFAULT_SECTIONS.writing_style),
+        tone=_first(form, "tone", DEFAULT_SECTIONS.tone),
+        plot_beats=_first(form, "plot_beats", DEFAULT_SECTIONS.plot_beats),
+        constraints=_first(form, "constraints", DEFAULT_SECTIONS.constraints),
+    )
+
+
+def _parse_text_list(value: str) -> list[str]:
+    return [
+        re.sub(r"^[-*\d\.\)\s]+", "", line.strip()).strip()
+        for line in (value or "").splitlines()
+        if line.strip()
+    ]
+
+
+def _render_text_list(value: object) -> str:
+    if isinstance(value, list):
+        return "\n".join(str(item).strip() for item in value if str(item).strip())
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def _extract_chapter_details(form: Dict[str, list], num_chapters: int) -> Dict[int, Dict[str, object]]:
     chapter_details: Dict[int, Dict[str, object]] = {}
     for chapter_number in range(1, num_chapters + 1):
+        purpose = _first(form, f"chapter_detail_purpose_{chapter_number}", "").strip()
         beats = _first(form, f"chapter_detail_beats_{chapter_number}", "").strip()
+        characters = _first(form, f"chapter_detail_characters_{chapter_number}", "").strip()
+        setting = _first(form, f"chapter_detail_setting_{chapter_number}", "").strip()
+        tone = _first(form, f"chapter_detail_tone_{chapter_number}", "").strip()
+        must_include = _parse_text_list(_first(form, f"chapter_detail_must_include_{chapter_number}", ""))
+        avoid = _parse_text_list(_first(form, f"chapter_detail_avoid_{chapter_number}", ""))
+        guidance_emphasis = _first(form, f"chapter_detail_guidance_emphasis_{chapter_number}", "").strip()
+        guidance_compression = _first(form, f"chapter_detail_guidance_compression_{chapter_number}", "").strip()
+        guidance_opening = _first(form, f"chapter_detail_guidance_opening_{chapter_number}", "").strip()
+        guidance_middle = _first(form, f"chapter_detail_guidance_middle_{chapter_number}", "").strip()
+        guidance_ending = _first(form, f"chapter_detail_guidance_ending_{chapter_number}", "").strip()
         try:
             target_word_count = int(_first(form, f"chapter_detail_wordcount_{chapter_number}", "0") or "0")
         except ValueError:
             target_word_count = 0
-        if beats or target_word_count > 0:
-            chapter_details[chapter_number] = {
-                "beats": beats,
-                "target_word_count": max(0, target_word_count),
-            }
+        chapter_guidance: Dict[str, object] = {}
+        distribution = {
+            "opening": guidance_opening,
+            "middle": guidance_middle,
+            "ending": guidance_ending,
+        }
+        distribution = {key: value for key, value in distribution.items() if value}
+        if distribution:
+            chapter_guidance["word_count_distribution"] = distribution
+        if guidance_emphasis:
+            chapter_guidance["emphasis"] = guidance_emphasis
+        if guidance_compression:
+            chapter_guidance["compression"] = guidance_compression
+
+        detail: Dict[str, object] = {}
+        if purpose:
+            detail["purpose"] = purpose
+        if beats:
+            detail["beats"] = beats
+        if target_word_count > 0:
+            detail["target_word_count"] = max(0, target_word_count)
+        if characters:
+            detail["characters"] = characters
+        if setting:
+            detail["setting"] = setting
+        if tone:
+            detail["tone"] = tone
+        if must_include:
+            detail["must_include"] = must_include
+        if avoid:
+            detail["avoid"] = avoid
+        if chapter_guidance:
+            detail["chapter_guidance"] = chapter_guidance
+        if detail:
+            chapter_details[chapter_number] = detail
     return chapter_details
+
+
+def _extract_chapter_tool_detail(form: Dict[str, list]) -> tuple[Dict[str, object], bool]:
+    structured_field_names = (
+        "chapter_tool_purpose",
+        "chapter_tool_beats",
+        "chapter_tool_target_word_count",
+        "chapter_tool_tone",
+        "chapter_tool_characters",
+        "chapter_tool_setting",
+        "chapter_tool_must_include",
+        "chapter_tool_avoid",
+        "chapter_tool_guidance_emphasis",
+        "chapter_tool_guidance_compression",
+        "chapter_tool_guidance_opening",
+        "chapter_tool_guidance_middle",
+        "chapter_tool_guidance_ending",
+    )
+    has_structured_fields = any(name in form for name in structured_field_names)
+    if has_structured_fields:
+        purpose = _first(form, "chapter_tool_purpose", "").strip()
+        beats = _first(form, "chapter_tool_beats", "").strip()
+        characters = _first(form, "chapter_tool_characters", "").strip()
+        setting = _first(form, "chapter_tool_setting", "").strip()
+        tone = _first(form, "chapter_tool_tone", "").strip()
+        must_include = _parse_text_list(_first(form, "chapter_tool_must_include", ""))
+        avoid = _parse_text_list(_first(form, "chapter_tool_avoid", ""))
+        guidance_emphasis = _first(form, "chapter_tool_guidance_emphasis", "").strip()
+        guidance_compression = _first(form, "chapter_tool_guidance_compression", "").strip()
+        guidance_opening = _first(form, "chapter_tool_guidance_opening", "").strip()
+        guidance_middle = _first(form, "chapter_tool_guidance_middle", "").strip()
+        guidance_ending = _first(form, "chapter_tool_guidance_ending", "").strip()
+        try:
+            target_word_count = int(_first(form, "chapter_tool_target_word_count", "0") or "0")
+        except ValueError:
+            target_word_count = 0
+
+        chapter_guidance: Dict[str, object] = {}
+        distribution = {
+            "opening": guidance_opening,
+            "middle": guidance_middle,
+            "ending": guidance_ending,
+        }
+        distribution = {key: value for key, value in distribution.items() if value}
+        if distribution:
+            chapter_guidance["word_count_distribution"] = distribution
+        if guidance_emphasis:
+            chapter_guidance["emphasis"] = guidance_emphasis
+        if guidance_compression:
+            chapter_guidance["compression"] = guidance_compression
+
+        detail: Dict[str, object] = {
+            "purpose": purpose,
+            "beats": beats,
+            "target_word_count": max(0, target_word_count),
+            "tone": tone,
+            "characters": characters,
+            "setting": setting,
+            "must_include": must_include,
+            "avoid": avoid,
+            "chapter_guidance": chapter_guidance,
+        }
+        return detail, True
+
+    beats = _first(form, "advice", "").strip()
+    target_word_count_raw = _first(form, "target_word_count", "").strip()
+    try:
+        target_word_count = int(target_word_count_raw) if target_word_count_raw else 0
+    except ValueError:
+        target_word_count = 0
+    detail = {}
+    if beats:
+        detail["beats"] = beats
+    if target_word_count > 0:
+        detail["target_word_count"] = target_word_count
+    return detail, False
 
 
 def _render_options(models: list[str], selected: str) -> str:
@@ -2111,26 +2315,185 @@ def _render_chapter_details_inputs(num_chapters: int, chapter_details: Dict[int,
     items = []
     for chapter_number in range(1, max(num_chapters, 1) + 1):
         details = chapter_details.get(chapter_number, {}) or chapter_details.get(str(chapter_number), {}) or {}
+        purpose = details.get("purpose", "") if isinstance(details, dict) else ""
         beats = details.get("beats", "") if isinstance(details, dict) else ""
         target_word_count = details.get("target_word_count", 0) if isinstance(details, dict) else 0
+        characters = details.get("characters", "") if isinstance(details, dict) else ""
+        setting = details.get("setting", "") if isinstance(details, dict) else ""
+        tone = details.get("tone", "") if isinstance(details, dict) else ""
+        must_include = details.get("must_include", []) if isinstance(details, dict) else []
+        avoid = details.get("avoid", []) if isinstance(details, dict) else []
+        chapter_guidance = details.get("chapter_guidance", {}) if isinstance(details, dict) and isinstance(details.get("chapter_guidance"), dict) else {}
+        distribution = chapter_guidance.get("word_count_distribution", {}) if isinstance(chapter_guidance.get("word_count_distribution"), dict) else {}
         items.append(
             f"""
             <div class="chapter-detail-group" data-chapter-group="{chapter_number}">
               <div class="chapter-detail-group__heading">Chapter {chapter_number}</div>
-              <div class="chapter-detail-group__fields">
-                <div class="chapter-detail-group__field chapter-detail-group__field--text">
-                  <label class="label" for="chapter_detail_beats_{chapter_number}">Chapter Details</label>
-                  <textarea id="chapter_detail_beats_{chapter_number}" name="chapter_detail_beats_{chapter_number}" class="chapter-detail-beats-input" data-chapter="{chapter_number}" placeholder="Required beats for Chapter {chapter_number}.">{escape(str(beats or ""))}</textarea>
+              <div class="chapter-detail-group__fields chapter-detail-group__fields--rich">
+                <div class="chapter-detail-group__field chapter-detail-group__field--full">
+                  <label class="label" for="chapter_detail_purpose_{chapter_number}">Purpose</label>
+                  <textarea id="chapter_detail_purpose_{chapter_number}" name="chapter_detail_purpose_{chapter_number}" data-chapter="{chapter_number}" data-detail-path="purpose" placeholder="What this chapter needs to accomplish.">{escape(str(purpose or ""))}</textarea>
                 </div>
-                <div class="chapter-detail-group__field chapter-detail-group__field--compact">
-                  <label class="label" for="chapter_detail_wordcount_{chapter_number}">Target Word Count</label>
-                  <input id="chapter_detail_wordcount_{chapter_number}" name="chapter_detail_wordcount_{chapter_number}" type="number" min="0" max="50000" class="chapter-detail-wordcount-input" data-chapter="{chapter_number}" value="{int(target_word_count or 0)}">
+                <div class="chapter-detail-group__field chapter-detail-group__field--full">
+                  <label class="label" for="chapter_detail_beats_{chapter_number}">Beats</label>
+                  <textarea id="chapter_detail_beats_{chapter_number}" name="chapter_detail_beats_{chapter_number}" class="chapter-detail-beats-input" data-chapter="{chapter_number}" data-detail-path="beats" placeholder="Required beats for Chapter {chapter_number}.">{escape(str(beats or ""))}</textarea>
+                </div>
+                <div class="field-grid-two chapter-detail-group__field chapter-detail-group__field--full">
+                  <div>
+                    <label class="label" for="chapter_detail_wordcount_{chapter_number}">Target Word Count</label>
+                    <input id="chapter_detail_wordcount_{chapter_number}" name="chapter_detail_wordcount_{chapter_number}" type="number" min="0" max="50000" class="chapter-detail-wordcount-input" data-chapter="{chapter_number}" data-detail-path="target_word_count" data-value-type="number" value="{int(target_word_count or 0)}">
+                  </div>
+                  <div>
+                    <label class="label" for="chapter_detail_tone_{chapter_number}">Tone</label>
+                    <textarea id="chapter_detail_tone_{chapter_number}" name="chapter_detail_tone_{chapter_number}" data-chapter="{chapter_number}" data-detail-path="tone" placeholder="Chapter-specific emotional and narrative tone.">{escape(str(tone or ""))}</textarea>
+                  </div>
+                </div>
+                <div class="chapter-detail-group__field chapter-detail-group__field--full">
+                  <label class="label" for="chapter_detail_characters_{chapter_number}">Characters</label>
+                  <textarea id="chapter_detail_characters_{chapter_number}" name="chapter_detail_characters_{chapter_number}" data-chapter="{chapter_number}" data-detail-path="characters" placeholder="Who this chapter should foreground.">{escape(str(characters or ""))}</textarea>
+                </div>
+                <div class="chapter-detail-group__field chapter-detail-group__field--full">
+                  <label class="label" for="chapter_detail_setting_{chapter_number}">Setting</label>
+                  <textarea id="chapter_detail_setting_{chapter_number}" name="chapter_detail_setting_{chapter_number}" data-chapter="{chapter_number}" data-detail-path="setting" placeholder="Specific location, atmosphere, and physical context.">{escape(str(setting or ""))}</textarea>
+                </div>
+                <div class="field-grid-two chapter-detail-group__field chapter-detail-group__field--full">
+                  <div>
+                    <label class="label" for="chapter_detail_guidance_emphasis_{chapter_number}">Guidance: Emphasis</label>
+                    <textarea id="chapter_detail_guidance_emphasis_{chapter_number}" name="chapter_detail_guidance_emphasis_{chapter_number}" data-chapter="{chapter_number}" data-detail-path="chapter_guidance.emphasis" placeholder="Where the chapter should spend its weight.">{escape(str(chapter_guidance.get("emphasis", "") or ""))}</textarea>
+                  </div>
+                  <div>
+                    <label class="label" for="chapter_detail_guidance_compression_{chapter_number}">Guidance: Compression</label>
+                    <textarea id="chapter_detail_guidance_compression_{chapter_number}" name="chapter_detail_guidance_compression_{chapter_number}" data-chapter="{chapter_number}" data-detail-path="chapter_guidance.compression" placeholder="What should stay brief or tight.">{escape(str(chapter_guidance.get("compression", "") or ""))}</textarea>
+                  </div>
+                </div>
+                <div class="field-grid-three chapter-detail-group__field chapter-detail-group__field--full">
+                  <div>
+                    <label class="label" for="chapter_detail_guidance_opening_{chapter_number}">Opening Share</label>
+                    <input id="chapter_detail_guidance_opening_{chapter_number}" name="chapter_detail_guidance_opening_{chapter_number}" type="text" data-chapter="{chapter_number}" data-detail-path="chapter_guidance.word_count_distribution.opening" placeholder="15%" value="{escape(str(distribution.get("opening", "") or ""))}">
+                  </div>
+                  <div>
+                    <label class="label" for="chapter_detail_guidance_middle_{chapter_number}">Middle Share</label>
+                    <input id="chapter_detail_guidance_middle_{chapter_number}" name="chapter_detail_guidance_middle_{chapter_number}" type="text" data-chapter="{chapter_number}" data-detail-path="chapter_guidance.word_count_distribution.middle" placeholder="55%" value="{escape(str(distribution.get("middle", "") or ""))}">
+                  </div>
+                  <div>
+                    <label class="label" for="chapter_detail_guidance_ending_{chapter_number}">Ending Share</label>
+                    <input id="chapter_detail_guidance_ending_{chapter_number}" name="chapter_detail_guidance_ending_{chapter_number}" type="text" data-chapter="{chapter_number}" data-detail-path="chapter_guidance.word_count_distribution.ending" placeholder="30%" value="{escape(str(distribution.get("ending", "") or ""))}">
+                  </div>
+                </div>
+                <div class="field-grid-two chapter-detail-group__field chapter-detail-group__field--full">
+                  <div>
+                    <label class="label" for="chapter_detail_must_include_{chapter_number}">Must Include</label>
+                    <textarea id="chapter_detail_must_include_{chapter_number}" name="chapter_detail_must_include_{chapter_number}" data-chapter="{chapter_number}" data-detail-path="must_include" data-value-type="list" placeholder="One item per line.">{escape(_render_text_list(must_include))}</textarea>
+                  </div>
+                  <div>
+                    <label class="label" for="chapter_detail_avoid_{chapter_number}">Avoid</label>
+                    <textarea id="chapter_detail_avoid_{chapter_number}" name="chapter_detail_avoid_{chapter_number}" data-chapter="{chapter_number}" data-detail-path="avoid" data-value-type="list" placeholder="One item per line.">{escape(_render_text_list(avoid))}</textarea>
+                  </div>
+                </div>
+                <div class="chapter-detail-group__field chapter-detail-group__field--full">
+                  <div class="support-copy">All fields are optional. Old configs with only beats and target word count will continue to load correctly.</div>
                 </div>
               </div>
             </div>
             """
         )
     return "".join(items)
+
+
+def _render_chapter_tool_inputs(
+    chapter_number: int,
+    chapter_detail: Dict[str, object] | None,
+    max_chapters: int,
+    can_queue_chapter_advice: bool,
+    can_regenerate_chapter: bool,
+) -> str:
+    details = chapter_detail if isinstance(chapter_detail, dict) else {}
+    purpose = details.get("purpose", "")
+    beats = details.get("beats", "")
+    target_word_count = details.get("target_word_count", 0)
+    characters = details.get("characters", "")
+    setting = details.get("setting", "")
+    tone = details.get("tone", "")
+    must_include = details.get("must_include", [])
+    avoid = details.get("avoid", [])
+    chapter_guidance = details.get("chapter_guidance", {}) if isinstance(details.get("chapter_guidance"), dict) else {}
+    distribution = chapter_guidance.get("word_count_distribution", {}) if isinstance(chapter_guidance.get("word_count_distribution"), dict) else {}
+    selected_chapter = max(1, min(max_chapters, int(chapter_number or 1)))
+    return f"""
+              <form method="post" action="/chapter-advice" class="async-form" id="chapter-tools-form">
+                <label class="label" for="chapter_tools_number">Chapter Number</label>
+                <input id="chapter_tools_number" type="number" min="1" max="{max(1, max_chapters)}" name="chapter_number" value="{selected_chapter}">
+                <div class="support-copy">The form loads the latest stored values for the selected chapter, whether they came from the original setup or a later queued advice update.</div>
+                <div class="chapter-detail-group chapter-detail-group--tools">
+                  <div class="chapter-detail-group__fields chapter-detail-group__fields--rich">
+                    <div class="chapter-detail-group__field chapter-detail-group__field--full">
+                      <label class="label" for="chapter_tool_purpose">Purpose</label>
+                      <textarea id="chapter_tool_purpose" name="chapter_tool_purpose" placeholder="What this chapter needs to accomplish.">{escape(str(purpose or ""))}</textarea>
+                    </div>
+                    <div class="chapter-detail-group__field chapter-detail-group__field--full">
+                      <label class="label" for="chapter_tool_beats">Beats</label>
+                      <textarea id="chapter_tool_beats" name="chapter_tool_beats" placeholder="Required beats for this chapter.">{escape(str(beats or ""))}</textarea>
+                    </div>
+                    <div class="field-grid-two chapter-detail-group__field chapter-detail-group__field--full">
+                      <div>
+                        <label class="label" for="chapter_tool_target_word_count">Target Word Count</label>
+                        <input id="chapter_tool_target_word_count" name="chapter_tool_target_word_count" type="number" min="0" max="50000" value="{int(target_word_count or 0)}">
+                      </div>
+                      <div>
+                        <label class="label" for="chapter_tool_tone">Tone</label>
+                        <textarea id="chapter_tool_tone" name="chapter_tool_tone" placeholder="Chapter-specific emotional and narrative tone.">{escape(str(tone or ""))}</textarea>
+                      </div>
+                    </div>
+                    <div class="chapter-detail-group__field chapter-detail-group__field--full">
+                      <label class="label" for="chapter_tool_characters">Characters</label>
+                      <textarea id="chapter_tool_characters" name="chapter_tool_characters" placeholder="Who this chapter should foreground.">{escape(str(characters or ""))}</textarea>
+                    </div>
+                    <div class="chapter-detail-group__field chapter-detail-group__field--full">
+                      <label class="label" for="chapter_tool_setting">Setting</label>
+                      <textarea id="chapter_tool_setting" name="chapter_tool_setting" placeholder="Specific location, atmosphere, and physical context.">{escape(str(setting or ""))}</textarea>
+                    </div>
+                    <div class="field-grid-two chapter-detail-group__field chapter-detail-group__field--full">
+                      <div>
+                        <label class="label" for="chapter_tool_guidance_emphasis">Guidance: Emphasis</label>
+                        <textarea id="chapter_tool_guidance_emphasis" name="chapter_tool_guidance_emphasis" placeholder="Where the chapter should spend its weight.">{escape(str(chapter_guidance.get("emphasis", "") or ""))}</textarea>
+                      </div>
+                      <div>
+                        <label class="label" for="chapter_tool_guidance_compression">Guidance: Compression</label>
+                        <textarea id="chapter_tool_guidance_compression" name="chapter_tool_guidance_compression" placeholder="What should stay brief or tight.">{escape(str(chapter_guidance.get("compression", "") or ""))}</textarea>
+                      </div>
+                    </div>
+                    <div class="field-grid-three chapter-detail-group__field chapter-detail-group__field--full">
+                      <div>
+                        <label class="label" for="chapter_tool_guidance_opening">Opening Share</label>
+                        <input id="chapter_tool_guidance_opening" name="chapter_tool_guidance_opening" type="text" placeholder="15%" value="{escape(str(distribution.get("opening", "") or ""))}">
+                      </div>
+                      <div>
+                        <label class="label" for="chapter_tool_guidance_middle">Middle Share</label>
+                        <input id="chapter_tool_guidance_middle" name="chapter_tool_guidance_middle" type="text" placeholder="55%" value="{escape(str(distribution.get("middle", "") or ""))}">
+                      </div>
+                      <div>
+                        <label class="label" for="chapter_tool_guidance_ending">Ending Share</label>
+                        <input id="chapter_tool_guidance_ending" name="chapter_tool_guidance_ending" type="text" placeholder="30%" value="{escape(str(distribution.get("ending", "") or ""))}">
+                      </div>
+                    </div>
+                    <div class="field-grid-two chapter-detail-group__field chapter-detail-group__field--full">
+                      <div>
+                        <label class="label" for="chapter_tool_must_include">Must Include</label>
+                        <textarea id="chapter_tool_must_include" name="chapter_tool_must_include" placeholder="One item per line.">{escape(_render_text_list(must_include))}</textarea>
+                      </div>
+                      <div>
+                        <label class="label" for="chapter_tool_avoid">Avoid</label>
+                        <textarea id="chapter_tool_avoid" name="chapter_tool_avoid" placeholder="One item per line.">{escape(_render_text_list(avoid))}</textarea>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="controls chapter-action">
+                  <button id="chapter-advice-button" {"disabled" if not can_queue_chapter_advice else ""}>&#10148; Queue Chapter Advice</button>
+                  <button id="regen-chapter-button" formaction="/regenerate-chapter" class="secondary" {"disabled" if not can_regenerate_chapter else ""}>&#8635; Regenerate Chapter</button>
+                </div>
+              </form>
+    """
 
 
 def _render_chapter_item(number: int, title: str, status: str, selected: bool = False) -> str:

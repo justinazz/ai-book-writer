@@ -40,6 +40,7 @@ META_PROSE_PATTERNS = (
     r"(?im)^\s*additionally,\s*each beat anchor specified\b.*$",
     r"(?im)^\s*the chapter concludes with\b.*$",
 )
+MAX_UNBROKEN_TOKEN_CHARS = 180
 
 class GenerationPauseRequested(RuntimeError):
     """Raised when the controller requests a safe pause during chapter generation."""
@@ -58,6 +59,8 @@ class BookGenerator:
         validation_callback: Optional[Callable[[Dict], None]] = None,
         should_stop_callback: Optional[Callable[[], bool]] = None,
         initial_chapter_memory: Optional[Dict[int, str]] = None,
+        runtime_settings_provider: Optional[Callable[[], Dict[str, object]]] = None,
+        writer_model_name: str = "",
     ):
         """Initialize with outline to maintain chapter count context"""
         self.agents = agents
@@ -75,6 +78,10 @@ class BookGenerator:
         self.chapter_prompt_provider = chapter_prompt_provider
         self.validation_callback = validation_callback
         self.should_stop_callback = should_stop_callback
+        self.runtime_settings_provider = runtime_settings_provider
+        self.writer_model_name = str(writer_model_name or "").strip()
+        self.writer_system_message = getattr(self.agents.get("writer"), "system_message", "") or ""
+        self._writer_config_signature = self._config_signature(self.agent_config)
         os.makedirs(self.output_dir, exist_ok=True)
 
     def _log(self, message: str) -> None:
@@ -86,6 +93,68 @@ class BookGenerator:
         body = (content or "").rstrip() or "[empty]"
         divider = "=" * 20
         self._log(f"{divider} {header} {divider}\n{body}\n{divider} END {header} {divider}")
+
+    @staticmethod
+    def _config_signature(config: Dict) -> str:
+        try:
+            return json.dumps(config or {}, sort_keys=True, ensure_ascii=False, default=str)
+        except TypeError:
+            return repr(config or {})
+
+    def _build_writer_agent(self, name: str = "writer") -> autogen.AssistantAgent:
+        system_message = self.writer_system_message or getattr(self.agents.get("writer"), "system_message", "") or ""
+        return autogen.AssistantAgent(
+            name=name,
+            system_message=system_message,
+            llm_config=self.agent_config,
+        )
+
+    def _refresh_writer_runtime(self, chapter_number: int, attempt: int, step_name: str) -> bool:
+        if not self.runtime_settings_provider:
+            return False
+        try:
+            payload = self.runtime_settings_provider() or {}
+        except Exception as exc:
+            self._log(
+                "[book_generator] Runtime settings provider failed "
+                f"for chapter {chapter_number}, attempt {attempt}, step {step_name}: {exc}"
+            )
+            return False
+
+        changed_bits: List[str] = []
+        next_config = payload.get("writer_config")
+        if isinstance(next_config, dict):
+            next_signature = self._config_signature(next_config)
+            if next_signature != self._writer_config_signature:
+                self.agent_config = next_config
+                self._writer_config_signature = next_signature
+                self.agents["writer"] = self._build_writer_agent("writer")
+                changed_bits.append("writer config refreshed")
+
+        next_writer_model = str(payload.get("writer_model") or "").strip()
+        if next_writer_model and next_writer_model != self.writer_model_name:
+            previous_writer_model = self.writer_model_name or "[unset]"
+            self.writer_model_name = next_writer_model
+            changed_bits.append(f"writer model {previous_writer_model} -> {next_writer_model}")
+
+        next_max_iterations = payload.get("max_iterations")
+        if next_max_iterations is not None:
+            normalized_max_iterations = max(1, int(next_max_iterations))
+            if normalized_max_iterations != self.max_iterations:
+                previous_max_iterations = self.max_iterations
+                self.max_iterations = normalized_max_iterations
+                changed_bits.append(
+                    f"max iterations {previous_max_iterations} -> {normalized_max_iterations}"
+                )
+
+        if changed_bits:
+            self._log(
+                "[book_generator] Applied live runtime update "
+                f"for chapter {chapter_number}, attempt {attempt}, step {step_name}: "
+                + "; ".join(changed_bits)
+            )
+            return True
+        return False
 
     def _log_groupchat_setup(self, groupchat: autogen.GroupChat, context_label: str) -> None:
         for agent in groupchat.agents:
@@ -150,16 +219,51 @@ class BookGenerator:
         if not isinstance(details, dict):
             return ""
         beats = str(details.get("beats", "")).strip()
+        purpose = str(details.get("purpose", "")).strip()
+        tone = str(details.get("tone", "")).strip()
+        characters = str(details.get("characters", "")).strip()
+        setting = str(details.get("setting", "")).strip()
+        must_include = details.get("must_include")
+        avoid = details.get("avoid")
+        chapter_guidance = details.get("chapter_guidance") if isinstance(details.get("chapter_guidance"), dict) else {}
         try:
             target_word_count = int(details.get("target_word_count", 0) or 0)
         except (TypeError, ValueError):
             target_word_count = 0
         lines: List[str] = []
+        if purpose:
+            lines.append(f"Purpose: {purpose}")
+        if characters:
+            lines.append(f"Characters: {characters}")
+        if setting:
+            lines.append(f"Setting: {setting}")
+        if tone:
+            lines.append(f"Tone: {tone}")
         if target_word_count > 0:
             lines.append(f"Target Word Count: {target_word_count}")
         if beats:
             lines.append("Beats:")
             lines.append(beats)
+        if isinstance(chapter_guidance, dict) and chapter_guidance:
+            lines.append("Chapter Guidance:")
+            distribution = chapter_guidance.get("word_count_distribution", {})
+            if isinstance(distribution, dict):
+                for label in ("opening", "middle", "ending"):
+                    value = str(distribution.get(label, "")).strip()
+                    if value:
+                        lines.append(f"- {label.title()}: {value}")
+            emphasis = str(chapter_guidance.get("emphasis", "")).strip()
+            compression = str(chapter_guidance.get("compression", "")).strip()
+            if emphasis:
+                lines.append(f"Emphasis: {emphasis}")
+            if compression:
+                lines.append(f"Compression: {compression}")
+        if isinstance(must_include, list) and must_include:
+            lines.append("Must Include:")
+            lines.extend(f"- {str(item).strip()}" for item in must_include if str(item).strip())
+        if isinstance(avoid, list) and avoid:
+            lines.append("Avoid:")
+            lines.extend(f"- {str(item).strip()}" for item in avoid if str(item).strip())
         return "\n".join(lines).strip()
 
     def _raise_if_pause_requested(
@@ -291,7 +395,21 @@ class BookGenerator:
                 findings.append(match.group(0).strip())
         return findings
 
+    def _find_overlong_unbroken_tokens(self, content: str, limit: int = MAX_UNBROKEN_TOKEN_CHARS) -> List[str]:
+        if not content or limit <= 0:
+            return []
+        return re.findall(rf"\S{{{limit + 1},}}", content)
+
     def _validate_prose_integrity(self, content: str) -> tuple[bool, str]:
+        cleaned = self._clean_chapter_content(content or "")
+        overlong_tokens = self._find_overlong_unbroken_tokens(cleaned)
+        if overlong_tokens:
+            example = overlong_tokens[0]
+            excerpt = example[:80] + ("..." if len(example) > 80 else "")
+            return (
+                False,
+                f"Detected degenerate unbroken token ({len(example)} characters) in chapter content. Example: {excerpt}",
+            )
         findings = self._find_meta_prose_artifacts(content)
         if not findings:
             return True, "No prohibited meta prose detected."
@@ -456,6 +574,19 @@ class BookGenerator:
 
     def _compact_text_for_prompt(self, text: str, max_words: int, label: str) -> str:
         cleaned = self._clean_chapter_content(text or "")
+        if cleaned:
+            def replace_overlong_token(match: re.Match[str]) -> str:
+                token = match.group(0)
+                head = token[:60]
+                tail = token[-40:] if len(token) > 100 else ""
+                marker = f"[long unbroken token truncated from {len(token)} chars in {label}]"
+                return " ".join(part for part in (head, marker, tail) if part)
+
+            cleaned = re.sub(
+                rf"\S{{{MAX_UNBROKEN_TOKEN_CHARS + 1},}}",
+                replace_overlong_token,
+                cleaned,
+            )
         actual_word_count = self._count_words(cleaned)
         if actual_word_count <= max_words:
             return cleaned
@@ -787,7 +918,20 @@ class BookGenerator:
         ]
         line_items = [
             item for item in line_items
-            if item and not item.lower().startswith(("target word count:", "these chapter details are mandatory"))
+            if item and not item.lower().startswith((
+                "target word count:",
+                "these chapter details are mandatory",
+                "purpose:",
+                "tone:",
+                "characters:",
+                "setting:",
+                "chapter guidance:",
+                "word count distribution:",
+                "emphasis:",
+                "compression:",
+                "must include:",
+                "avoid:",
+            ))
         ]
         if len(line_items) > 1:
             items = line_items
@@ -827,6 +971,8 @@ class BookGenerator:
             "Preserve the narrative intent, order, and specificity of these beats, but natural rewording in prose is acceptable.",
             "If these beat anchors conflict with broader outline summary bullets, follow these beat anchors.",
             "Do not import explicit beats from other chapters.",
+            "If the chapter needs more length, deepen these beats before inventing any new ending beat or postscript scene.",
+            "Prefer on-page expansion through sensory detail, body language, interiority, dialogue subtext, and immediate consequences.",
         ]).strip()
 
     def _extract_beat_check_items(self, editor_output: str) -> List[str]:
@@ -853,6 +999,23 @@ class BookGenerator:
             for item in self._extract_beat_check_items(editor_output)
             if "FAIL" in item.upper()
         ]
+
+    def _extract_editor_guidance_block(self, editor_output: str, label: str) -> str:
+        editor_output = self._normalize_editor_output(editor_output)
+        return self._extract_labeled_block(
+            editor_output,
+            label,
+            [
+                "BEAT CHECK",
+                "BEAT CHECK RESULT",
+                "LOOP CHECK RESULT",
+                "SENTENCE LENGTH CHECK",
+                "SENTENCE LENGTH CHECK RESULT",
+                "WORD COUNT ADVICE",
+                "SUGGEST",
+                "FEEDBACK",
+            ],
+        )
 
     def _build_retry_feedback_focus(self, editor_output: str, chapter_content: str = "", target_word_count: int = 0) -> str:
         if not editor_output:
@@ -888,6 +1051,17 @@ class BookGenerator:
                 sections.append(sentence_block)
             sections.append("SENTENCE LENGTH CHECK RESULT: FAIL")
 
+        if target_word_count > 0:
+            _, word_count_passed, _ = self._validate_word_count(chapter_content, target_word_count)
+            if not word_count_passed:
+                word_count_block = self._extract_editor_guidance_block(editor_output, "WORD COUNT ADVICE")
+                if word_count_block:
+                    sections.append(word_count_block)
+
+        suggest_block = self._extract_editor_guidance_block(editor_output, "SUGGEST")
+        if suggest_block:
+            sections.append(suggest_block)
+
         if sections:
             return self._compact_text_for_prompt("\n\n".join(sections), 300, "unresolved prior feedback")
 
@@ -901,13 +1075,20 @@ class BookGenerator:
         )
         return matches[-1].upper() if matches else ""
 
-    def _summarize_chapter_requirements(self, prompt: str) -> str:
+    def _summarize_chapter_requirements(self, prompt: str, include_additional_guidance: bool = True) -> str:
         summary = re.sub(
             r"\n\s*Required Chapter Details:\s*.*\Z",
             "",
             prompt or "",
             flags=re.IGNORECASE | re.DOTALL,
         ).strip()
+        if not include_additional_guidance:
+            summary = re.sub(
+                r"\n\s*Additional Chapter Guidance:\s*.*\Z",
+                "",
+                summary,
+                flags=re.IGNORECASE | re.DOTALL,
+            ).strip()
         if not summary:
             summary = (prompt or "").strip()
         return re.sub(r"\n{3,}", "\n\n", summary).strip()
@@ -947,9 +1128,18 @@ class BookGenerator:
             sections.append("Output Integrity Issue:\n- " + prose_integrity_message)
 
         if target_word_count > 0:
+            _, word_count_passed, _ = self._validate_word_count(chapter_content, target_word_count)
+            if not word_count_passed:
+                word_count_block = self._extract_editor_guidance_block(editor_output, "WORD COUNT ADVICE")
+                if word_count_block:
+                    sections.append(word_count_block)
             word_count_guidance = self._build_word_count_retry_guidance(chapter_content, target_word_count)
             if word_count_guidance:
                 sections.append(word_count_guidance)
+
+        suggest_block = self._extract_editor_guidance_block(editor_output, "SUGGEST")
+        if suggest_block:
+            sections.append(suggest_block)
 
         if not sections:
             return ""
@@ -1038,8 +1228,10 @@ class BookGenerator:
                 "System Word Count Recovery Advice:",
                 f"- The previous usable prose was only {actual_word_count} words long for a target of {target_word_count}.",
                 f"- Add roughly {max(1, target_word_count - actual_word_count)} more words of real scene material.",
-                "- Expand thin moments with concrete additions: extra dialogue turns, physical action, sensory detail, interiority, or immediate consequences.",
+                "- Expand underdeveloped existing beats before creating any new beat, coda, or aftermath scene.",
+                "- Prefer concrete additions such as extra dialogue turns, physical action, sensory detail, interiority, or immediate consequences inside an existing beat.",
                 "- Add content where the scene feels summarized or rushed instead of repeating the same emotional beat.",
+                "- Do not tack on a generic reflection, travel beat, recap, or late epilogue just to hit the number.",
                 "- The editor should point to specific places that need expansion before the final rewrite.",
             ])
         return "\n".join([
@@ -1137,11 +1329,7 @@ class BookGenerator:
 
     def initiate_group_chat(self) -> autogen.GroupChat:
         """Create a new group chat for the agents with improved speaking order"""
-        writer_final = autogen.AssistantAgent(
-            name="writer_final",
-            system_message=self.agents["writer"].system_message,
-            llm_config=self.agent_config
-        )
+        writer_final = self._build_writer_agent("writer_final")
         
         return autogen.GroupChat(
             agents=[
@@ -1171,7 +1359,7 @@ class BookGenerator:
 
     def _extract_required_chapter_details(self, prompt: str) -> tuple[List[str], int]:
         match = re.search(
-            r"Required Chapter Details:\s*(.*?)(?:\n\s*Additional guidance for this chapter:|\Z)",
+            r"Required Chapter Details:\s*(.*?)(?:\n\s*Additional (?:Chapter )?Guidance:|\Z)",
             prompt,
             re.IGNORECASE | re.DOTALL,
         )
@@ -1622,6 +1810,9 @@ Requirements:
 - Do not import explicit beats from other chapters.
 - Do not copy checklist labels, retry labels, or compliance commentary into the prose.
 - Make real forward progress in every paragraph.
+- If the chapter needs more length, deepen an existing beat before inventing any new event, coda, or aftermath.
+- Preferred expansion order: sensory detail, physical business, dialogue subtext, interior thought, and immediate consequences inside the active beat.
+- Do not tack on a low-stakes reflection or wrap-up after the scene has already landed.
 - Give the scene a proper ending, not an abrupt cutoff.{range_instruction}
 
 Previous Context:
@@ -1656,6 +1847,9 @@ Requirements:
 - Do not import explicit beats from other chapters.
 - Do not copy checklist labels, retry labels, or compliance commentary into the prose.
 - Make real forward progress in every paragraph.
+- If the chapter needs more length, deepen an existing beat before inventing any new event, coda, or aftermath.
+- Preferred expansion order: sensory detail, physical business, dialogue subtext, interior thought, and immediate consequences inside the active beat.
+- Do not tack on a low-stakes reflection or wrap-up after the scene has already landed.
 - Give the scene a proper ending, not an abrupt cutoff.{range_instruction}
 
 Previous Context:
@@ -1691,7 +1885,7 @@ Final Mandatory Checklist Before Writing:
             "draft scene",
         )
         beat_focus_block = self._format_required_beat_checklist(required_beats)
-        prompt_summary = self._summarize_chapter_requirements(prompt)
+        prompt_summary = self._summarize_chapter_requirements(prompt, include_additional_guidance=False)
         return f"""Review the draft for Chapter {chapter_number}: {chapter_title}.
 
 Return ONLY valid JSON. Do not write the final chapter.
@@ -1716,6 +1910,10 @@ In WORD COUNT ADVICE:
 - If the draft is too long, identify specific moments, exchanges, or paragraphs that should be cut or tightened and explain what to remove or compress.
 - If the length is acceptable, say that directly and explicitly state that no word-count changes are required.
 - Do not recommend trimming or padding only to hit the exact target if the draft is already inside the acceptable range.
+- Prefer depth-first expansion inside underdeveloped existing beats before recommending any brand-new event.
+- Name the specific beat item, exchange, or paragraph that should be expanded when the chapter is short.
+- Recommend additions such as sensory detail, physical action, interior reasoning, dialogue subtext, or immediate consequences tied to an existing beat.
+- Do not recommend a new coda, epilogue, travel beat, recap, or generic reflection solely to raise the word count.
 - Report whole-draft word count information only in WORD COUNT ADVICE, not in any other section.{range_instruction}
 - If the chapter summary includes Writing Style Guidance, check whether the draft materially follows it and call out meaningful style drift in the structured feedback.
 
@@ -1808,6 +2006,9 @@ Requirements:
 - Treat the current-chapter beat anchors below as higher priority than generic outline bullets or editor paraphrases.
 - Faithful paraphrase is encouraged; exact wording is not required.
 - Missing, merging away, or reordering any numbered checklist item causes automatic rejection and another retry.
+- If extra length is needed, deepen earlier or existing beats before inventing any new event or aftermath.
+- Prefer expansion through sensory detail, physical business, dialogue subtext, interiority, and immediate consequences within the current beat.
+- Do not tack on a low-stakes coda, recap, travel beat, or generic reflection after the intended ending.
 - Keep the chapter coherent and fully written from start to finish.{range_instruction}
 
 Previous Context:
@@ -1846,6 +2047,9 @@ Requirements:
 - Use the broader outline only for continuity after the checklist is satisfied.
 - Do not import explicit beats from other chapters.
 - Do not copy prompt labels, checklist text, or retry context into the prose.
+- If extra length is needed, deepen earlier or existing beats before inventing any new event or aftermath.
+- Prefer expansion through sensory detail, physical business, dialogue subtext, interiority, and immediate consequences within the current beat.
+- Do not tack on a low-stakes coda, recap, travel beat, or generic reflection after the intended ending.
 - Keep the chapter coherent and fully written from start to finish.{range_instruction}
 
 Previous Context:
@@ -1886,11 +2090,15 @@ Accepted Chapter Text:
         retry_guidance = ""
         prior_editor_output = ""
         prior_scene = ""
+        self._refresh_writer_runtime(chapter_number, 0, "chapter_start")
         base_attempt_budget = max(3, self.max_iterations)
         max_attempts = base_attempt_budget
         attempt = 1
 
         while attempt <= max_attempts:
+            self._refresh_writer_runtime(chapter_number, attempt, "attempt_start")
+            base_attempt_budget = max(3, self.max_iterations)
+            max_attempts = max(max_attempts, base_attempt_budget)
             draft_scene = ""
             editor_output = ""
             final_scene = ""
@@ -1964,6 +2172,7 @@ Accepted Chapter Text:
                     "Pause requested; stopping before writer draft.",
                     "draft",
                 )
+                self._refresh_writer_runtime(chapter_number, attempt, "writer_draft")
                 writer_output = self._run_agent_step(
                     chapter_number,
                     chapter_title,
@@ -2030,11 +2239,8 @@ Accepted Chapter Text:
                         "Draft already satisfies the actionable beat, loop, sentence-length, prose-integrity, and word-count checks. Promoting draft directly to final review.",
                     )
                 else:
-                    writer_final = autogen.AssistantAgent(
-                        name="writer_final",
-                        system_message=self.agents["writer"].system_message,
-                        llm_config=self.agent_config,
-                    )
+                    self._refresh_writer_runtime(chapter_number, attempt, "writer_final")
+                    writer_final = self._build_writer_agent("writer_final")
                     current_word_count_guidance = self._build_word_count_retry_guidance(draft_scene, target_word_count)
                     final_retry_context = self._strip_word_count_recovery_advice(retry_context)
                     if current_word_count_guidance:
@@ -2282,11 +2488,14 @@ Accepted Chapter Text:
         context = self._prepare_chapter_context(chapter_number, prompt)
         active_prompt = prompt
         active_prompt_version: Optional[int] = None
+        self._refresh_writer_runtime(chapter_number, 0, "recovery_start")
         base_attempt_budget = max(3, self.max_iterations)
         max_retry_attempts = 2
         retry_attempt = 1
 
         while retry_attempt <= max_retry_attempts:
+            self._refresh_writer_runtime(chapter_number, self.max_iterations + retry_attempt, "recovery_attempt_start")
+            base_attempt_budget = max(3, self.max_iterations)
             draft_scene = ""
             editor_output = ""
             final_scene = ""
@@ -2362,6 +2571,7 @@ Accepted Chapter Text:
                     "Pause requested; stopping before recovery writer draft.",
                     "draft",
                 )
+                self._refresh_writer_runtime(chapter_number, attempt_number, "recovery_writer_draft")
                 writer_output = self._run_agent_step(
                     chapter_number,
                     chapter_title,
@@ -2430,11 +2640,8 @@ Accepted Chapter Text:
                         "Recovery draft already satisfies the actionable beat, loop, sentence-length, prose-integrity, and word-count checks. Promoting draft directly to final review.",
                     )
                 else:
-                    writer_final = autogen.AssistantAgent(
-                        name="writer_final",
-                        system_message=self.agents["writer"].system_message,
-                        llm_config=self.agent_config,
-                    )
+                    self._refresh_writer_runtime(chapter_number, attempt_number, "recovery_writer_final")
+                    writer_final = self._build_writer_agent("writer_final")
                     current_word_count_guidance = self._build_word_count_retry_guidance(draft_scene, target_word_count)
                     final_retry_context = self._strip_word_count_recovery_advice(retry_context)
                     if current_word_count_guidance:
@@ -2634,11 +2841,8 @@ Accepted Chapter Text:
             "- Preserve all current scene facts, ordering, and required beats while adding concrete material in thin moments.",
             "- Do not output notes, an apology, or meta commentary.",
         ])
-        writer_final = autogen.AssistantAgent(
-            name="writer_final",
-            system_message=self.agents["writer"].system_message,
-            llm_config=self.agent_config,
-        )
+        self._refresh_writer_runtime(chapter_number, self.max_iterations + 1, "retry_length_recovery")
+        writer_final = self._build_writer_agent("writer_final")
         recovery_prompt = self._build_writer_final_prompt(
             chapter_number,
             chapter_title,

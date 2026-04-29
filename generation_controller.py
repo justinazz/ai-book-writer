@@ -1,10 +1,11 @@
 """Background generation controller for the browser UI."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from datetime import datetime
 import json
 import os
+import re
 import threading
 import traceback
 from typing import Callable, Dict, List, Optional
@@ -19,6 +20,8 @@ from outline_generator import OutlineGenerator
 
 CONFIG_DIR = "saved_configs"
 MEMORY_SNAPSHOT_FILE = "memory.txt"
+PROMPT_SECTION_ARRAY_FIELDS = {"premise", "characters", "tone", "plot_beats"}
+CHAPTER_DETAIL_ARRAY_FIELDS = {"purpose", "beats", "tone", "characters"}
 
 
 def _utc_timestamp() -> str:
@@ -123,6 +126,7 @@ class RunSnapshot:
     reduce_thinking: bool = False
     max_iterations: int = 5
     chapter_target_word_count: int = 0
+    overall_word_count_advice: str = ""
     output_folder: str = OUTPUT_FOLDER
     config_name: str = ""
     chapter_details: Dict[int, Dict[str, object]] = field(default_factory=dict)
@@ -189,24 +193,227 @@ class GenerationController:
         divider = "=" * 20
         self._log_runtime(f"{divider} {header} {divider}\n{body}\n{divider} END {header} {divider}")
 
+    @staticmethod
+    def _normalize_optional_text(value: object) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @staticmethod
+    def _normalize_text_lines(value: object) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [line.strip() for line in value.splitlines() if line.strip()]
+        text = str(value).strip()
+        return [text] if text else []
+
+    def _normalize_multiline_text(self, value: object) -> str:
+        if isinstance(value, list):
+            return "\n".join(self._normalize_text_lines(value)).strip()
+        return self._normalize_optional_text(value)
+
+    @staticmethod
+    def _normalize_text_list(value: object) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            return items
+        if isinstance(value, str):
+            items = [
+                re.sub(r"^[-*\d\.\)\s]+", "", line.strip()).strip()
+                for line in value.splitlines()
+                if line.strip()
+            ]
+            return [item for item in items if item]
+        text = str(value).strip()
+        return [text] if text else []
+
+    def _normalize_overall_word_count_advice(self, value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            lines = self._normalize_text_list(value)
+            return "\n".join(f"- {line}" for line in lines).strip()
+        if isinstance(value, dict):
+            lines: List[str] = []
+            strategy = self._normalize_optional_text(value.get("strategy"))
+            allocation_notes = self._normalize_text_list(value.get("allocation_notes"))
+            if strategy:
+                lines.append(strategy)
+            if allocation_notes:
+                if lines:
+                    lines.append("")
+                lines.append("Allocation Notes:")
+                lines.extend(f"- {note}" for note in allocation_notes)
+            for key, nested_value in value.items():
+                if key in {"strategy", "allocation_notes"}:
+                    continue
+                nested_text = self._normalize_overall_word_count_advice(nested_value)
+                if not nested_text:
+                    continue
+                if lines:
+                    lines.append("")
+                label = str(key).replace("_", " ").strip().title()
+                lines.append(f"{label}:")
+                lines.append(nested_text)
+            return "\n".join(lines).strip()
+        return str(value).strip()
+
+    def _normalize_prompt_sections_payload(self, payload: Dict | None) -> PromptSections:
+        if not isinstance(payload, dict):
+            return PromptSections()
+        normalized = {}
+        for prompt_field in dataclass_fields(PromptSections):
+            value = payload.get(prompt_field.name)
+            if prompt_field.name in PROMPT_SECTION_ARRAY_FIELDS:
+                normalized[prompt_field.name] = self._normalize_multiline_text(value)
+            else:
+                normalized[prompt_field.name] = self._normalize_optional_text(value)
+        return PromptSections(**normalized)
+
+    def _serialize_prompt_sections_for_config(self, prompt_sections: PromptSections) -> Dict[str, object]:
+        serialized: Dict[str, object] = {}
+        source = prompt_sections.__dict__ if isinstance(prompt_sections, PromptSections) else {}
+        for prompt_field in dataclass_fields(PromptSections):
+            value = source.get(prompt_field.name, "")
+            if prompt_field.name in PROMPT_SECTION_ARRAY_FIELDS:
+                serialized[prompt_field.name] = self._normalize_text_lines(value)
+            else:
+                serialized[prompt_field.name] = self._normalize_optional_text(value)
+        return serialized
+
+    def _normalize_word_count_distribution(self, value: object) -> Dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        normalized: Dict[str, str] = {}
+        for key in ("opening", "middle", "ending"):
+            text = self._normalize_optional_text(value.get(key))
+            if text:
+                normalized[key] = text
+        return normalized
+
+    def _normalize_chapter_guidance(self, value: object) -> Dict[str, object]:
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            text = value.strip()
+            return {"emphasis": text} if text else {}
+        if not isinstance(value, dict):
+            return {}
+
+        normalized: Dict[str, object] = {}
+        emphasis = self._normalize_optional_text(value.get("emphasis"))
+        compression = self._normalize_optional_text(value.get("compression"))
+        distribution_source = value.get("word_count_distribution")
+        if distribution_source is None:
+            distribution_source = value.get("distribution")
+        if distribution_source is None and any(key in value for key in ("opening", "middle", "ending")):
+            distribution_source = value
+        distribution = self._normalize_word_count_distribution(distribution_source)
+        if emphasis:
+            normalized["emphasis"] = emphasis
+        if compression:
+            normalized["compression"] = compression
+        if distribution:
+            normalized["word_count_distribution"] = distribution
+        return normalized
+
+    def _serialize_chapter_details_for_config(
+        self,
+        chapter_details: Dict[int, Dict[str, object]] | Dict[str, Dict[str, object]] | None,
+        num_chapters: int,
+    ) -> Dict[str, Dict[str, object]]:
+        serialized: Dict[str, Dict[str, object]] = {}
+        source = chapter_details if isinstance(chapter_details, dict) else {}
+        for chapter_number in range(1, max(1, int(num_chapters or 0)) + 1):
+            details = source.get(chapter_number, {}) or source.get(str(chapter_number), {}) or {}
+            if not isinstance(details, dict):
+                details = {}
+            guidance = self._normalize_chapter_guidance(details.get("chapter_guidance"))
+            distribution = guidance.get("word_count_distribution", {}) if isinstance(guidance.get("word_count_distribution"), dict) else {}
+            try:
+                target_word_count = max(0, int(details.get("target_word_count", 0) or 0))
+            except (TypeError, ValueError):
+                target_word_count = 0
+            serialized[str(chapter_number)] = {
+                "purpose": self._normalize_text_lines(details.get("purpose")),
+                "beats": self._normalize_text_lines(details.get("beats")),
+                "target_word_count": target_word_count,
+                "chapter_guidance": {
+                    "emphasis": self._normalize_optional_text(guidance.get("emphasis")),
+                    "compression": self._normalize_optional_text(guidance.get("compression")),
+                    "word_count_distribution": {
+                        "opening": self._normalize_optional_text(distribution.get("opening")),
+                        "middle": self._normalize_optional_text(distribution.get("middle")),
+                        "ending": self._normalize_optional_text(distribution.get("ending")),
+                    },
+                },
+                "tone": self._normalize_text_lines(details.get("tone")),
+                "characters": self._normalize_text_lines(details.get("characters")),
+                "setting": self._normalize_optional_text(details.get("setting")),
+                "must_include": self._normalize_text_list(details.get("must_include")),
+                "avoid": self._normalize_text_list(details.get("avoid")),
+            }
+        return serialized
+
+    def _chapter_detail_has_content(self, details: Dict[str, object] | None) -> bool:
+        if not isinstance(details, dict):
+            return False
+        for key in ("purpose", "beats", "tone", "characters", "setting"):
+            if self._normalize_optional_text(details.get(key)):
+                return True
+        try:
+            if int(details.get("target_word_count", 0) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        if self._normalize_text_list(details.get("must_include")):
+            return True
+        if self._normalize_text_list(details.get("avoid")):
+            return True
+        guidance = self._normalize_chapter_guidance(details.get("chapter_guidance"))
+        if guidance:
+            return True
+        return False
+
+    def _chapter_detail_signature(self, details: Dict[str, object] | None) -> str:
+        if not self._chapter_detail_has_content(details):
+            return ""
+        return json.dumps(details or {}, sort_keys=True, ensure_ascii=False)
+
+    def _sync_chapter_detail_versions(
+        self,
+        prior_details: Dict[int, Dict[str, object]],
+        new_details: Dict[int, Dict[str, object]],
+        num_chapters: int,
+    ) -> None:
+        versions: Dict[int, int] = {}
+        for chapter_number in range(1, max(0, num_chapters) + 1):
+            current_details = new_details.get(chapter_number, {})
+            if not self._chapter_detail_has_content(current_details):
+                continue
+            previous_signature = self._chapter_detail_signature(prior_details.get(chapter_number, {}))
+            current_signature = self._chapter_detail_signature(current_details)
+            previous_version = int(self._chapter_detail_versions.get(chapter_number, 0) or 0)
+            if previous_signature and previous_signature == current_signature:
+                versions[chapter_number] = previous_version or 1
+            else:
+                versions[chapter_number] = previous_version + 1 if previous_version > 0 else 1
+        self._chapter_detail_versions = versions
+
     def _reset_chapter_detail_versions(
         self,
         chapter_details: Dict[int, Dict[str, object]],
         num_chapters: int,
     ) -> None:
-        versions: Dict[int, int] = {}
-        for chapter_number in range(1, max(0, num_chapters) + 1):
-            details = chapter_details.get(chapter_number, {})
-            beats = str(details.get("beats", "")).strip() if isinstance(details, dict) else ""
-            target_word_count = 0
-            if isinstance(details, dict):
-                try:
-                    target_word_count = int(details.get("target_word_count", 0) or 0)
-                except (TypeError, ValueError):
-                    target_word_count = 0
-            if beats or target_word_count > 0:
-                versions[chapter_number] = 1
-        self._chapter_detail_versions = versions
+        self._chapter_detail_versions = {}
+        self._sync_chapter_detail_versions({}, chapter_details, num_chapters)
 
     def _build_basic_saved_summary(self, chapter_number: int, chapter_text: str) -> str:
         cleaned = " ".join((chapter_text or "").split())
@@ -382,6 +589,145 @@ class GenerationController:
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(content)
 
+    @staticmethod
+    def _format_prompt_list(items: List[str]) -> str:
+        return "\n".join(f"- {item}" for item in items if str(item).strip()).strip()
+
+    def _render_additional_chapter_guidance(self, chapter_number: int, details: Dict[str, object]) -> str:
+        if not isinstance(details, dict):
+            return ""
+
+        parts: List[str] = []
+        for label, key in (
+            ("Purpose", "purpose"),
+            ("Characters", "characters"),
+            ("Setting", "setting"),
+            ("Tone", "tone"),
+        ):
+            text = self._normalize_optional_text(details.get(key))
+            if text:
+                parts.append(f"{label}:\n{text}")
+
+        guidance = self._normalize_chapter_guidance(details.get("chapter_guidance"))
+        if guidance:
+            guidance_lines: List[str] = []
+            distribution = guidance.get("word_count_distribution", {})
+            if isinstance(distribution, dict):
+                distribution_lines = [
+                    f"- {label.title()}: {distribution[label]}"
+                    for label in ("opening", "middle", "ending")
+                    if self._normalize_optional_text(distribution.get(label))
+                ]
+                if distribution_lines:
+                    guidance_lines.append("Word Count Distribution:")
+                    guidance_lines.extend(distribution_lines)
+            emphasis = self._normalize_optional_text(guidance.get("emphasis"))
+            compression = self._normalize_optional_text(guidance.get("compression"))
+            if emphasis:
+                guidance_lines.append(f"Emphasis:\n{emphasis}")
+            if compression:
+                guidance_lines.append(f"Compression:\n{compression}")
+            if guidance_lines:
+                parts.append("\n".join(["Chapter Guidance:", *guidance_lines]))
+
+        must_include = self._normalize_text_list(details.get("must_include"))
+        if must_include:
+            parts.append("Must Include:\n" + self._format_prompt_list(must_include))
+
+        avoid = self._normalize_text_list(details.get("avoid"))
+        if avoid:
+            parts.append("Avoid:\n" + self._format_prompt_list(avoid))
+
+        if not parts:
+            return ""
+
+        guidance_note = (
+            f"These chapter-specific guidance notes should shape Chapter {chapter_number}'s prose, pacing, and emphasis. "
+            "Required Chapter Details still remain the binding checklist."
+        )
+        return "\n\n".join([
+            "Additional Chapter Guidance:",
+            "\n\n".join(parts),
+            guidance_note,
+        ]).strip()
+
+    def _render_required_chapter_details(
+        self,
+        chapter_number: int,
+        details: Dict[str, object],
+        default_target_word_count: int,
+    ) -> str:
+        if not isinstance(details, dict):
+            return ""
+
+        beats = self._normalize_optional_text(details.get("beats"))
+        try:
+            target_word_count = int(details.get("target_word_count", 0) or 0) or default_target_word_count
+        except (TypeError, ValueError):
+            target_word_count = default_target_word_count
+
+        if not beats and target_word_count <= 0:
+            return ""
+
+        detail_lines: List[str] = []
+        if target_word_count > 0:
+            detail_lines.append(f"Target Word Count: {target_word_count}")
+        if beats:
+            detail_lines.append("Beats:")
+            detail_lines.append(beats)
+        return (
+            f"Required Chapter Details:\n{chr(10).join(detail_lines)}\n\n"
+            f"These chapter details are mandatory for Chapter {chapter_number}. "
+            "Do not skip, defer, or substantially violate them."
+        ).strip()
+
+    def _format_chapter_detail_summary(self, details: Dict[str, object]) -> str:
+        if not isinstance(details, dict):
+            return ""
+        lines: List[str] = []
+        for label, key in (
+            ("Purpose", "purpose"),
+            ("Characters", "characters"),
+            ("Setting", "setting"),
+            ("Tone", "tone"),
+        ):
+            text = self._normalize_optional_text(details.get(key))
+            if text:
+                lines.append(f"{label}: {text}")
+        try:
+            target_word_count = int(details.get("target_word_count", 0) or 0)
+        except (TypeError, ValueError):
+            target_word_count = 0
+        if target_word_count > 0:
+            lines.append(f"Target Word Count: {target_word_count}")
+        beats = self._normalize_optional_text(details.get("beats"))
+        if beats:
+            lines.extend(["Beats:", beats])
+        guidance = self._normalize_chapter_guidance(details.get("chapter_guidance"))
+        if guidance:
+            lines.append("Chapter Guidance:")
+            distribution = guidance.get("word_count_distribution", {})
+            if isinstance(distribution, dict):
+                for label in ("opening", "middle", "ending"):
+                    value = self._normalize_optional_text(distribution.get(label))
+                    if value:
+                        lines.append(f"- {label.title()}: {value}")
+            emphasis = self._normalize_optional_text(guidance.get("emphasis"))
+            compression = self._normalize_optional_text(guidance.get("compression"))
+            if emphasis:
+                lines.append(f"Emphasis: {emphasis}")
+            if compression:
+                lines.append(f"Compression: {compression}")
+        must_include = self._normalize_text_list(details.get("must_include"))
+        if must_include:
+            lines.append("Must Include:")
+            lines.extend(f"- {item}" for item in must_include)
+        avoid = self._normalize_text_list(details.get("avoid"))
+        if avoid:
+            lines.append("Avoid:")
+            lines.extend(f"- {item}" for item in avoid)
+        return "\n".join(lines).strip()
+
     def _build_effective_chapter_prompt(
         self,
         chapter_number: int,
@@ -392,27 +738,27 @@ class GenerationController:
         prompt = self._apply_chapter_writing_style(chapter_prompt, prompt_sections)
         with self._lock:
             default_target_word_count = int(self._state.chapter_target_word_count or 0)
+            overall_word_count_advice = self._normalize_optional_text(self._state.overall_word_count_advice)
         details_map = chapter_details_source if chapter_details_source is not None else self._state.chapter_details
         chapter_specific_details = details_map.get(chapter_number, {}) if isinstance(details_map, dict) else {}
-        chapter_specific_beats = str(chapter_specific_details.get("beats", "")).strip()
-        try:
-            chapter_specific_word_count = int(chapter_specific_details.get("target_word_count", 0) or 0) or default_target_word_count
-        except (TypeError, ValueError):
-            chapter_specific_word_count = default_target_word_count
-        if chapter_specific_beats or chapter_specific_word_count > 0:
-            detail_lines = []
-            if chapter_specific_word_count > 0:
-                detail_lines.append(f"Target Word Count: {chapter_specific_word_count}")
-            if chapter_specific_beats:
-                detail_lines.append("Beats:")
-                detail_lines.append(chapter_specific_beats)
-            prompt = (
-                f"{prompt}\n\nRequired Chapter Details:\n"
-                f"{chr(10).join(detail_lines)}\n\n"
-                f"These chapter details are mandatory for Chapter {chapter_number}. "
-                "Do not skip, defer, or substantially violate them."
-            )
-        return prompt
+        blocks: List[str] = [prompt]
+        if overall_word_count_advice and "Overall Word Count Guidance:" not in prompt:
+            blocks.append("\n".join([
+                "Overall Word Count Guidance:",
+                overall_word_count_advice,
+                "Use this as high-level pacing guidance across the book while still satisfying the current chapter's required details.",
+            ]))
+        additional_guidance = self._render_additional_chapter_guidance(chapter_number, chapter_specific_details)
+        if additional_guidance:
+            blocks.append(additional_guidance)
+        required_details = self._render_required_chapter_details(
+            chapter_number,
+            chapter_specific_details,
+            default_target_word_count,
+        )
+        if required_details:
+            blocks.append(required_details)
+        return "\n\n".join(block for block in blocks if block.strip()).strip()
 
     def _make_chapter_prompt_provider(
         self,
@@ -490,6 +836,7 @@ class GenerationController:
                 reduce_thinking=self._state.reduce_thinking,
                 max_iterations=self._state.max_iterations,
                 chapter_target_word_count=self._state.chapter_target_word_count,
+                overall_word_count_advice=self._state.overall_word_count_advice,
                 output_folder=self._state.output_folder,
                 config_name=self._state.config_name,
                 chapter_details={number: dict(details) for number, details in self._state.chapter_details.items()},
@@ -560,6 +907,46 @@ class GenerationController:
                 self._state.available_models = []
                 self._state.model_fetch_error = str(exc)
                 self._append_event(f"{_utc_timestamp()} - Model refresh failed: {exc}")
+
+    def _current_runtime_settings(self) -> Dict[str, object]:
+        with self._lock:
+            endpoint_url = str(self._state.endpoint_url or DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+            outline_model = str(self._state.outline_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+            writer_model = str(self._state.writer_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+            token_limit_enabled = bool(self._state.token_limit_enabled)
+            max_tokens = int(self._state.max_tokens or 0)
+            reduce_thinking = bool(self._state.reduce_thinking)
+            max_iterations = self._normalize_max_iterations(self._state.max_iterations)
+
+        requested_max_tokens = max_tokens if token_limit_enabled else None
+        extra_body = {
+            "thinking": False,
+            "enable_thinking": False,
+        } if reduce_thinking else None
+        reasoning_effort = "low" if reduce_thinking else None
+        return {
+            "endpoint_url": endpoint_url,
+            "outline_model": outline_model,
+            "writer_model": writer_model,
+            "token_limit_enabled": token_limit_enabled,
+            "max_tokens": max_tokens,
+            "requested_max_tokens": requested_max_tokens,
+            "reduce_thinking": reduce_thinking,
+            "reasoning_effort": reasoning_effort,
+            "extra_body": extra_body,
+            "max_iterations": max_iterations,
+        }
+
+    def _current_writer_runtime_settings(self) -> Dict[str, object]:
+        settings = self._current_runtime_settings()
+        settings["writer_config"] = get_config(
+            local_url=str(settings["endpoint_url"]),
+            model=str(settings["writer_model"]),
+            max_tokens=settings.get("requested_max_tokens"),
+            reasoning_effort=settings.get("reasoning_effort"),
+            extra_body=settings.get("extra_body"),
+        )
+        return settings
 
     def _extract_provider_error_message(self, raw_body: str) -> str:
         text = (raw_body or "").strip()
@@ -683,23 +1070,31 @@ class GenerationController:
             "Pick a different model or reload it in the local provider, then retry or resume."
         )
 
-    def build_prompt(self, sections: PromptSections) -> str:
+    def build_prompt(self, sections: PromptSections, overall_word_count_advice: str = "") -> str:
+        blocks = [
+            ("Premise", sections.premise),
+            ("Storylines / Arcs", sections.storylines),
+            ("Setting / World", sections.setting),
+            ("Characters", sections.characters),
+            ("Writing Style", sections.writing_style),
+            ("Tone", sections.tone),
+            ("Important Plot Beats", sections.plot_beats),
+            ("Constraints / Must Include", sections.constraints),
+            ("Overall Word Count Advice", overall_word_count_advice),
+        ]
         return "\n\n".join(
-            block for block in [
-                f"Premise:\n{sections.premise.strip()}",
-                f"Storylines / Arcs:\n{sections.storylines.strip()}",
-                f"Setting / World:\n{sections.setting.strip()}",
-                f"Characters:\n{sections.characters.strip()}",
-                f"Writing Style:\n{sections.writing_style.strip()}",
-                f"Tone:\n{sections.tone.strip()}",
-                f"Important Plot Beats:\n{sections.plot_beats.strip()}",
-                f"Constraints / Must Include:\n{sections.constraints.strip()}",
-            ]
-            if block.split(":\n", 1)[1].strip()
+            f"{label}:\n{self._normalize_optional_text(value)}"
+            for label, value in blocks
+            if self._normalize_optional_text(value)
         )
 
-    def _build_run_prompt(self, sections: PromptSections, chapter_target_word_count: int) -> str:
-        prompt = self.build_prompt(sections)
+    def _build_run_prompt(
+        self,
+        sections: PromptSections,
+        chapter_target_word_count: int,
+        overall_word_count_advice: str = "",
+    ) -> str:
+        prompt = self.build_prompt(sections, overall_word_count_advice)
         if chapter_target_word_count > 0:
             prompt = f"{prompt}\n\nChapter Target Word Count:\n{chapter_target_word_count}"
         return prompt
@@ -709,16 +1104,17 @@ class GenerationController:
         sections: PromptSections,
         chapter_details: Dict[int, Dict[str, object]],
         chapter_target_word_count: int,
+        overall_word_count_advice: str = "",
     ) -> str:
-        prompt = self._build_run_prompt(sections, chapter_target_word_count)
+        prompt = self._build_run_prompt(sections, chapter_target_word_count, overall_word_count_advice)
         chapter_details_text = self._render_chapter_details(chapter_details)
         if chapter_details_text:
             prompt = "\n\n".join([
                 prompt,
-                "Mandatory Chapter Beat Anchors:",
-                "If chapter details or explicit chapter beats are provided below, they are binding requirements.",
+                "Mandatory Chapter Detail Anchors:",
+                "If chapter details are provided below, they are binding requirements for the matching chapters.",
                 "When shaping the story arc and later outline, do not ignore them, relocate them to different chapters, merge them away, soften them into vague summaries, or contradict them.",
-                "Treat each chapter's provided beats as fixed anchors that the story arc must preserve and support.",
+                "Treat each chapter's provided beats as fixed anchors and use the additional purpose, setting, tone, character, and guidance notes to shape that chapter's outline.",
                 f"Chapter Details:\n{chapter_details_text}",
             ])
         return prompt
@@ -759,34 +1155,103 @@ class GenerationController:
                 continue
             if not (1 <= chapter_number <= num_chapters):
                 continue
-            beats = ""
-            target_word_count = 0
+            normalized_detail: Dict[str, object] = {}
             if isinstance(value, dict):
-                beats = str(value.get("beats", "")).strip()
+                beats = self._normalize_multiline_text(value.get("beats"))
                 try:
                     target_word_count = int(value.get("target_word_count", 0) or 0)
                 except (TypeError, ValueError):
                     target_word_count = 0
+                purpose = self._normalize_multiline_text(value.get("purpose"))
+                tone = self._normalize_multiline_text(value.get("tone"))
+                characters = self._normalize_multiline_text(value.get("characters"))
+                setting = self._normalize_optional_text(value.get("setting"))
+                must_include = self._normalize_text_list(value.get("must_include"))
+                avoid = self._normalize_text_list(value.get("avoid"))
+                chapter_guidance_source = value.get("chapter_guidance")
+                if chapter_guidance_source is None:
+                    chapter_guidance_source = value.get("chapter_advice")
+                if chapter_guidance_source is None:
+                    chapter_guidance_source = value.get("chapter_advices")
+                chapter_guidance = self._normalize_chapter_guidance(chapter_guidance_source)
+                if purpose:
+                    normalized_detail["purpose"] = purpose
+                if tone:
+                    normalized_detail["tone"] = tone
+                if characters:
+                    normalized_detail["characters"] = characters
+                if setting:
+                    normalized_detail["setting"] = setting
+                if must_include:
+                    normalized_detail["must_include"] = must_include
+                if avoid:
+                    normalized_detail["avoid"] = avoid
+                if chapter_guidance:
+                    normalized_detail["chapter_guidance"] = chapter_guidance
             else:
-                beats = str(value).strip()
-            if beats or target_word_count > 0:
-                normalized[chapter_number] = {
-                    "beats": beats,
-                    "target_word_count": max(0, target_word_count),
-                }
+                beats = self._normalize_multiline_text(value)
+                target_word_count = 0
+            if beats:
+                normalized_detail["beats"] = beats
+            if target_word_count > 0:
+                normalized_detail["target_word_count"] = max(0, target_word_count)
+            if self._chapter_detail_has_content(normalized_detail):
+                normalized[chapter_number] = normalized_detail
         return normalized
 
     def _render_chapter_details(self, chapter_details: Dict[int, Dict[str, object]]) -> str:
         parts: List[str] = []
         for chapter_number in sorted(chapter_details):
             details = chapter_details[chapter_number]
-            beats = str(details.get("beats", "")).strip()
-            target_word_count = int(details.get("target_word_count", 0) or 0)
+            purpose = self._normalize_optional_text(details.get("purpose"))
+            characters = self._normalize_optional_text(details.get("characters"))
+            setting = self._normalize_optional_text(details.get("setting"))
+            tone = self._normalize_optional_text(details.get("tone"))
+            beats = self._normalize_optional_text(details.get("beats"))
+            try:
+                target_word_count = int(details.get("target_word_count", 0) or 0)
+            except (TypeError, ValueError):
+                target_word_count = 0
+            chapter_guidance = self._normalize_chapter_guidance(details.get("chapter_guidance"))
+            must_include = self._normalize_text_list(details.get("must_include"))
+            avoid = self._normalize_text_list(details.get("avoid"))
             section_parts = [f"Chapter {chapter_number} Details:"]
-            if beats:
-                section_parts.append(f"Beats:\n{beats}")
+            if purpose:
+                section_parts.append(f"Purpose:\n{purpose}")
+            if characters:
+                section_parts.append(f"Characters:\n{characters}")
+            if setting:
+                section_parts.append(f"Setting:\n{setting}")
+            if tone:
+                section_parts.append(f"Tone:\n{tone}")
+            if chapter_guidance:
+                guidance_lines: List[str] = []
+                distribution = chapter_guidance.get("word_count_distribution", {})
+                if isinstance(distribution, dict):
+                    distribution_lines = [
+                        f"- {label.title()}: {distribution[label]}"
+                        for label in ("opening", "middle", "ending")
+                        if self._normalize_optional_text(distribution.get(label))
+                    ]
+                    if distribution_lines:
+                        guidance_lines.append("Word Count Distribution:")
+                        guidance_lines.extend(distribution_lines)
+                emphasis = self._normalize_optional_text(chapter_guidance.get("emphasis"))
+                compression = self._normalize_optional_text(chapter_guidance.get("compression"))
+                if emphasis:
+                    guidance_lines.append(f"Emphasis:\n{emphasis}")
+                if compression:
+                    guidance_lines.append(f"Compression:\n{compression}")
+                if guidance_lines:
+                    section_parts.append("\n".join(["Chapter Guidance:", *guidance_lines]))
+            if must_include:
+                section_parts.append("Must Include:\n" + self._format_prompt_list(must_include))
+            if avoid:
+                section_parts.append("Avoid:\n" + self._format_prompt_list(avoid))
             if target_word_count > 0:
                 section_parts.append(f"Target Word Count: {target_word_count}")
+            if beats:
+                section_parts.append(f"Beats:\n{beats}")
             parts.append("\n".join(section_parts))
         return "\n\n".join(parts)
 
@@ -821,12 +1286,16 @@ class GenerationController:
         reduce_thinking: bool,
         max_iterations: int,
         chapter_target_word_count: int,
+        overall_word_count_advice: str,
     ) -> None:
         safe_name = "".join(ch for ch in name.strip() if ch.isalnum() or ch in (" ", "-", "_")).strip()
         if not safe_name:
             return
         normalized_chapter_details = self._normalize_chapter_details(chapter_details, num_chapters)
+        serialized_chapter_details = self._serialize_chapter_details_for_config(normalized_chapter_details, num_chapters)
+        serialized_prompt_sections = self._serialize_prompt_sections_for_config(prompt_sections)
         normalized_max_iterations = self._normalize_max_iterations(max_iterations)
+        normalized_overall_word_count_advice = self._normalize_overall_word_count_advice(overall_word_count_advice)
         with self._lock:
             output_folder = self._state.output_folder or OUTPUT_FOLDER
         payload = {
@@ -841,9 +1310,10 @@ class GenerationController:
             "reduce_thinking": reduce_thinking,
             "max_iterations": normalized_max_iterations,
             "chapter_target_word_count": max(0, chapter_target_word_count),
+            "overall_word_count_advice": normalized_overall_word_count_advice,
             "output_folder": output_folder,
-            "chapter_details": {str(key): value for key, value in normalized_chapter_details.items()},
-            "prompt_sections": asdict(prompt_sections),
+            "chapter_details": serialized_chapter_details,
+            "prompt_sections": serialized_prompt_sections,
         }
         self._persist_config_payload(safe_name, payload)
 
@@ -860,6 +1330,7 @@ class GenerationController:
         reduce_thinking: bool,
         max_iterations: int,
         chapter_target_word_count: int,
+        overall_word_count_advice: str,
     ) -> bool:
         with self._condition:
             if self._thread and self._thread.is_alive():
@@ -867,7 +1338,12 @@ class GenerationController:
 
             normalized_chapter_details = self._normalize_chapter_details(chapter_details, num_chapters)
             normalized_max_iterations = self._normalize_max_iterations(max_iterations)
-            prompt = self._build_run_prompt(prompt_sections, chapter_target_word_count)
+            normalized_overall_word_count_advice = self._normalize_overall_word_count_advice(overall_word_count_advice)
+            prompt = self._build_run_prompt(
+                prompt_sections,
+                chapter_target_word_count,
+                normalized_overall_word_count_advice,
+            )
             prior_mode = self._state.mode
             available_models = list(self._state.available_models)
             saved_configs = list(self._state.saved_configs)
@@ -893,6 +1369,7 @@ class GenerationController:
                 reduce_thinking=reduce_thinking,
                 max_iterations=normalized_max_iterations,
                 chapter_target_word_count=max(0, chapter_target_word_count),
+                overall_word_count_advice=normalized_overall_word_count_advice,
                 output_folder=self._state.output_folder,
                 config_name=config_name,
                 chapter_details=normalized_chapter_details,
@@ -921,6 +1398,11 @@ class GenerationController:
         if not safe_name:
             return
         snapshot = self.get_snapshot()
+        serialized_chapter_details = self._serialize_chapter_details_for_config(
+            snapshot.chapter_details,
+            snapshot.num_chapters,
+        )
+        serialized_prompt_sections = self._serialize_prompt_sections_for_config(snapshot.prompt_sections)
         payload = {
             "name": safe_name,
             "created_at": _utc_timestamp(),
@@ -933,9 +1415,10 @@ class GenerationController:
             "reduce_thinking": snapshot.reduce_thinking,
             "max_iterations": snapshot.max_iterations,
             "chapter_target_word_count": snapshot.chapter_target_word_count,
+            "overall_word_count_advice": snapshot.overall_word_count_advice,
             "output_folder": snapshot.output_folder,
-            "chapter_details": {str(key): value for key, value in snapshot.chapter_details.items()},
-            "prompt_sections": asdict(snapshot.prompt_sections),
+            "chapter_details": serialized_chapter_details,
+            "prompt_sections": serialized_prompt_sections,
         }
         self._persist_config_payload(safe_name, payload)
 
@@ -949,7 +1432,14 @@ class GenerationController:
         self.load_config_payload(payload, f"Loaded config {filename}")
 
     def load_config_payload(self, payload: Dict, event_label: str = "Loaded external config") -> None:
-        sections = PromptSections(**payload.get("prompt_sections", {}))
+        prompt_sections_payload = payload.get("prompt_sections", {})
+        sections = self._normalize_prompt_sections_payload(prompt_sections_payload)
+        overall_word_count_advice = self._normalize_overall_word_count_advice(
+            payload.get(
+                "overall_word_count_advice",
+                prompt_sections_payload.get("overall_word_count_advice", ""),
+            ) if isinstance(prompt_sections_payload, dict) else payload.get("overall_word_count_advice", "")
+        )
         with self._lock:
             num_chapters = int(payload.get("num_chapters", self._state.num_chapters))
             chapter_details_source = payload.get("chapter_details")
@@ -967,12 +1457,17 @@ class GenerationController:
             self._state.reduce_thinking = bool(payload.get("reduce_thinking", self._state.reduce_thinking))
             self._state.max_iterations = self._normalize_max_iterations(payload.get("max_iterations", self._state.max_iterations))
             self._state.chapter_target_word_count = int(payload.get("chapter_target_word_count", self._state.chapter_target_word_count))
+            self._state.overall_word_count_advice = overall_word_count_advice
             self._state.output_folder = payload.get("output_folder", self._state.output_folder) or OUTPUT_FOLDER
             self._state.config_name = str(payload.get("name", self._state.config_name or "")).strip()
             self._state.chapter_details = chapter_details
             self._chapter_memory_records = {}
             self._reset_chapter_detail_versions(chapter_details, num_chapters)
-            self._state.prompt = self._build_run_prompt(sections, self._state.chapter_target_word_count)
+            self._state.prompt = self._build_run_prompt(
+                sections,
+                self._state.chapter_target_word_count,
+                self._state.overall_word_count_advice,
+            )
             self._state.chapters = [
                 ChapterStatus(number=i, title=f"Chapter {i}")
                 for i in range(1, self._state.num_chapters + 1)
@@ -987,6 +1482,106 @@ class GenerationController:
             self._clear_resume_state()
             self._state.phase_version += 1
             self._append_event(f"{_utc_timestamp()} - {event_label}")
+
+    def update_runtime_planning(
+        self,
+        prompt_sections: PromptSections,
+        chapter_details: Dict[int, Dict[str, object]],
+        chapter_target_word_count: int,
+        overall_word_count_advice: str,
+    ) -> None:
+        normalized_overall_word_count_advice = self._normalize_overall_word_count_advice(overall_word_count_advice)
+        with self._condition:
+            num_chapters = int(self._state.total_chapters or self._state.num_chapters or 0)
+            normalized_chapter_details = self._normalize_chapter_details(chapter_details, max(1, num_chapters))
+            prior_details = {
+                number: dict(details)
+                for number, details in self._state.chapter_details.items()
+            }
+            changed = bool(
+                self._state.prompt_sections != prompt_sections
+                or int(self._state.chapter_target_word_count or 0) != max(0, int(chapter_target_word_count or 0))
+                or self._normalize_optional_text(self._state.overall_word_count_advice) != normalized_overall_word_count_advice
+                or json.dumps(prior_details, sort_keys=True, ensure_ascii=False)
+                != json.dumps(normalized_chapter_details, sort_keys=True, ensure_ascii=False)
+            )
+            self._state.prompt_sections = prompt_sections
+            self._state.chapter_target_word_count = max(0, int(chapter_target_word_count or 0))
+            self._state.overall_word_count_advice = normalized_overall_word_count_advice
+            self._state.chapter_details = normalized_chapter_details
+            self._sync_chapter_detail_versions(prior_details, normalized_chapter_details, max(1, num_chapters))
+            self._state.prompt = self._build_run_prompt(
+                prompt_sections,
+                self._state.chapter_target_word_count,
+                self._state.overall_word_count_advice,
+            )
+            if changed:
+                self._state.phase_version += 1
+                self._append_event(f"{_utc_timestamp()} - Updated runtime planning inputs")
+                self._condition.notify_all()
+
+    def update_runtime_settings(
+        self,
+        *,
+        endpoint_url: Optional[str] = None,
+        outline_model: Optional[str] = None,
+        writer_model: Optional[str] = None,
+        token_limit_enabled: Optional[bool] = None,
+        max_tokens: Optional[int] = None,
+        reduce_thinking: Optional[bool] = None,
+        max_iterations: Optional[int] = None,
+    ) -> None:
+        changed_labels: List[str] = []
+        with self._condition:
+            if endpoint_url is not None:
+                normalized_endpoint_url = str(endpoint_url).strip() or DEFAULT_BASE_URL
+                if normalized_endpoint_url != self._state.endpoint_url:
+                    self._state.endpoint_url = normalized_endpoint_url
+                    changed_labels.append("endpoint URL")
+            if outline_model is not None:
+                normalized_outline_model = str(outline_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+                if normalized_outline_model != self._state.outline_model:
+                    self._state.outline_model = normalized_outline_model
+                    changed_labels.append("outline model")
+            if writer_model is not None:
+                normalized_writer_model = str(writer_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+                if normalized_writer_model != self._state.writer_model:
+                    self._state.writer_model = normalized_writer_model
+                    changed_labels.append("writer model")
+            if token_limit_enabled is not None:
+                normalized_token_limit_enabled = bool(token_limit_enabled)
+                if normalized_token_limit_enabled != self._state.token_limit_enabled:
+                    self._state.token_limit_enabled = normalized_token_limit_enabled
+                    changed_labels.append("token limit")
+            if max_tokens is not None:
+                normalized_max_tokens = max(1, int(max_tokens))
+                if normalized_max_tokens != self._state.max_tokens:
+                    self._state.max_tokens = normalized_max_tokens
+                    changed_labels.append("max tokens")
+            if reduce_thinking is not None:
+                normalized_reduce_thinking = bool(reduce_thinking)
+                if normalized_reduce_thinking != self._state.reduce_thinking:
+                    self._state.reduce_thinking = normalized_reduce_thinking
+                    changed_labels.append("thinking mode")
+            if max_iterations is not None:
+                normalized_max_iterations = self._normalize_max_iterations(max_iterations)
+                if normalized_max_iterations != self._state.max_iterations:
+                    self._state.max_iterations = normalized_max_iterations
+                    changed_labels.append("max iterations")
+
+            if not changed_labels:
+                return
+
+            self._state.phase_version += 1
+            applies_text = (
+                " Writer changes apply on the next writer step."
+                if self._state.run_active
+                else " Changes will be used on the next generation step."
+            )
+            self._append_event(
+                f"{_utc_timestamp()} - Updated runtime settings ({', '.join(changed_labels)}){applies_text}"
+            )
+            self._condition.notify_all()
 
     def approve_outline(self) -> None:
         with self._condition:
@@ -1079,23 +1674,38 @@ class GenerationController:
     def submit_chapter_advice(
         self,
         chapter_number: int,
-        beats: str,
-        target_word_count: Optional[int] = None,
+        chapter_details: Optional[Dict[str, object]] = None,
+        *,
+        replace_existing: bool = True,
+        resume_if_keep_going: bool = True,
     ) -> None:
-        beats = beats.strip()
+        chapter_details = dict(chapter_details or {})
         with self._condition:
             max_chapter = max(self._state.total_chapters, self._state.num_chapters, 1)
             if not (1 <= chapter_number <= max_chapter):
                 return
-            if not beats and (target_word_count is None or target_word_count <= 0):
-                return
-
+            normalized_update = self._normalize_chapter_details({chapter_number: chapter_details}, max_chapter).get(chapter_number, {})
             existing_details = dict(self._state.chapter_details.get(chapter_number, {}))
-            if beats:
-                existing_details["beats"] = beats
-            if target_word_count is not None and target_word_count > 0:
-                existing_details["target_word_count"] = max(0, int(target_word_count))
-            self._state.chapter_details[chapter_number] = existing_details
+            if replace_existing:
+                if normalized_update:
+                    next_details = normalized_update
+                    self._state.chapter_details[chapter_number] = next_details
+                else:
+                    if not existing_details:
+                        return
+                    next_details = {}
+                    self._state.chapter_details.pop(chapter_number, None)
+            else:
+                if not normalized_update:
+                    return
+                next_details = dict(existing_details)
+                next_details.update(normalized_update)
+                self._state.chapter_details[chapter_number] = next_details
+
+            if self._chapter_detail_signature(existing_details) == self._chapter_detail_signature(next_details):
+                if not next_details:
+                    self._state.chapter_details.pop(chapter_number, None)
+                return
 
             next_version = int(self._chapter_detail_versions.get(chapter_number, 0)) + 1
             self._chapter_detail_versions[chapter_number] = next_version
@@ -1113,13 +1723,16 @@ class GenerationController:
                 applies_text = f"Will apply the next time Chapter {chapter_number} is generated."
 
             summary_lines = [
-                f"Chapter {chapter_number} advice queued as beat override v{next_version}.",
+                (
+                    f"Chapter {chapter_number} advice queued as chapter detail override v{next_version}."
+                    if next_details
+                    else f"Chapter {chapter_number} chapter detail override cleared (v{next_version})."
+                ),
                 applies_text,
             ]
-            if target_word_count is not None and target_word_count > 0:
-                summary_lines.append(f"Target Word Count: {int(target_word_count)}")
-            if beats:
-                summary_lines.extend(["Beats:", beats])
+            details_summary = self._format_chapter_detail_summary(next_details)
+            if details_summary:
+                summary_lines.append(details_summary)
             summary = "\n".join(summary_lines).strip()
 
             self._state.latest_advice = summary
@@ -1127,9 +1740,13 @@ class GenerationController:
             review.improvement_notes = summary
             self._state.phase_version += 1
             self._append_event(
-                f"{_utc_timestamp()} - Chapter {chapter_number} beat override queued (v{next_version})"
+                (
+                    f"{_utc_timestamp()} - Chapter {chapter_number} chapter detail override queued (v{next_version})"
+                    if next_details
+                    else f"{_utc_timestamp()} - Chapter {chapter_number} chapter detail override cleared (v{next_version})"
+                )
             )
-            if self._state.mode == "keep_going" and not self._state.awaiting_outline_approval:
+            if resume_if_keep_going and self._state.mode == "keep_going" and not self._state.awaiting_outline_approval:
                 self._resume_requested = True
                 self._state.waiting_for_input = False
                 self._condition.notify_all()
@@ -1531,6 +2148,8 @@ class GenerationController:
             validation_callback=self._handle_validation_event,
             should_stop_callback=self._should_stop_chapter_generation,
             initial_chapter_memory=self._build_initial_chapter_memory(start_chapter),
+            runtime_settings_provider=self._current_writer_runtime_settings,
+            writer_model_name=writer_model,
         )
 
     def _mark_generation_paused(self, chapter_number: int, phase: str) -> None:
@@ -1661,11 +2280,12 @@ class GenerationController:
         except Exception as exc:  # pragma: no cover
             trace = traceback.format_exc()
             error_message = _format_exception(exc)
+            runtime_settings = self._current_runtime_settings()
             error_message = self._annotate_model_runtime_error(
                 error_message,
-                endpoint_url=endpoint_url,
-                outline_model=outline_model,
-                writer_model=writer_model,
+                endpoint_url=str(runtime_settings["endpoint_url"]),
+                outline_model=str(runtime_settings["outline_model"]),
+                writer_model=str(runtime_settings["writer_model"]),
             )
             if self._state.reduce_thinking:
                 error_message = (
@@ -1701,6 +2321,7 @@ class GenerationController:
                 reduce_thinking = self._state.reduce_thinking
                 max_iterations = self._state.max_iterations
                 chapter_target_word_count = self._state.chapter_target_word_count
+                overall_word_count_advice = self._state.overall_word_count_advice
                 output_folder = self._state.output_folder
             self._initialize_output_log(output_folder)
             self._write_memory_snapshot()
@@ -1715,11 +2336,16 @@ class GenerationController:
                     "[generation_controller] Using no-thinking settings: "
                     f"extra_body={extra_body}, reasoning_effort={reasoning_effort}"
                 )
-            prompt = self._build_run_prompt(prompt_sections, chapter_target_word_count)
+            prompt = self._build_run_prompt(
+                prompt_sections,
+                chapter_target_word_count,
+                overall_word_count_advice,
+            )
             outline_prompt = self._build_outline_prompt(
                 prompt_sections,
                 chapter_details,
                 chapter_target_word_count,
+                overall_word_count_advice,
             )
             self._log_runtime_block(
                 "RUN SETTINGS",
@@ -1733,6 +2359,7 @@ class GenerationController:
                     f"reasoning_effort: {reasoning_effort}",
                     f"max_iterations: {max_iterations}",
                     f"chapter_target_word_count: {chapter_target_word_count}",
+                    f"overall_word_count_advice: {bool(overall_word_count_advice.strip())}",
                     f"output_folder: {output_folder}",
                     f"num_chapters: {num_chapters}",
                 ]),
@@ -1828,11 +2455,12 @@ class GenerationController:
         except Exception as exc:  # pragma: no cover
             trace = traceback.format_exc()
             error_message = _format_exception(exc)
+            runtime_settings = self._current_runtime_settings()
             error_message = self._annotate_model_runtime_error(
                 error_message,
-                endpoint_url=endpoint_url,
-                outline_model=outline_model,
-                writer_model=writer_model,
+                endpoint_url=str(runtime_settings["endpoint_url"]),
+                outline_model=str(runtime_settings["outline_model"]),
+                writer_model=str(runtime_settings["writer_model"]),
             )
             if self._state.reduce_thinking:
                 error_message = (
@@ -1870,6 +2498,7 @@ class GenerationController:
                 reduce_thinking = self._state.reduce_thinking
                 max_iterations = self._state.max_iterations
                 chapter_target_word_count = self._state.chapter_target_word_count
+                overall_word_count_advice = self._state.overall_word_count_advice
                 output_folder = self._state.output_folder
                 prompt_sections = PromptSections(**self._state.prompt_sections.__dict__)
                 self._state.phase = f"Regenerating chapter {chapter_number}"
@@ -1899,6 +2528,7 @@ class GenerationController:
                     f"reasoning_effort: {reasoning_effort}",
                     f"max_iterations: {max_iterations}",
                     f"chapter_target_word_count: {chapter_target_word_count}",
+                    f"overall_word_count_advice: {bool((overall_word_count_advice or '').strip())}",
                     f"output_folder: {output_folder}",
                 ]),
             )
@@ -1974,11 +2604,12 @@ class GenerationController:
         except Exception as exc:  # pragma: no cover
             trace = traceback.format_exc()
             error_message = _format_exception(exc)
+            runtime_settings = self._current_runtime_settings()
             error_message = self._annotate_model_runtime_error(
                 error_message,
-                endpoint_url=endpoint_url,
-                outline_model=outline_model,
-                writer_model=writer_model,
+                endpoint_url=str(runtime_settings["endpoint_url"]),
+                outline_model=str(runtime_settings["outline_model"]),
+                writer_model=str(runtime_settings["writer_model"]),
             )
             if self._state.reduce_thinking:
                 error_message = (

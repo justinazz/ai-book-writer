@@ -73,11 +73,12 @@ class OutlineGenerator:
         if "Chapter Details:" not in (initial_prompt or ""):
             return ""
         return "\n".join([
-            "Mandatory Chapter Beats Guidance:",
+            "Mandatory Chapter Detail Guidance:",
             "- The book premise includes explicit chapter details and chapter beats.",
             "- Treat those chapter-specific beats as binding anchors for the story arc and the outline.",
             "- Do not ignore them, contradict them, move them to different chapters, merge them away, or replace them with broader substitutes.",
             "- The story arc must preserve and support the provided chapter beats chapter by chapter.",
+            "- When chapter details include purpose, setting, tone, characters, must-include items, avoid items, or chapter guidance, use them to shape that chapter's outline choices.",
             "- For any chapter that includes multiple story beats, convert them into at least 3 distinct, specific key events for that chapter outline.",
             "- Key events may paraphrase the chapter beats naturally, but they must preserve the same concrete actions, reveals, and progression.",
             "- Do not collapse a multi-beat chapter into 1 or 2 generic summary bullets if the provided chapter beats support 3 or more concrete events.",
@@ -96,7 +97,7 @@ class OutlineGenerator:
             chapter_number = int(match.group(1))
             section = match.group(2).strip()
             beats_match = re.search(
-                r"Beats:\s*(.*?)(?=\n\s*Target Word Count:|\Z)",
+                r"Beats:\s*(.*?)(?=\n\s*(?:Purpose|Characters|Setting|Tone|Chapter Guidance|Must Include|Avoid|Target Word Count):|\Z)",
                 section,
                 re.IGNORECASE | re.DOTALL,
             )
@@ -214,6 +215,7 @@ Requirements:
 - Do not skip chapters, combine chapters, or leave placeholders.
 - Every chapter must contain at least 3 specific key events.
 - When chapter beats are provided for a chapter, derive those key events from the provided beats.
+- When chapter details include purpose, setting, tone, characters, must-include items, avoid items, or chapter guidance, reflect them in that chapter's title, key events, character developments, setting, and tone.
 - If a chapter beat paragraph contains multiple actions, reveals, or turns, split them into 3-5 concrete key events instead of collapsing them into 1-2 vague bullets.
 - Faithful paraphrase is encouraged; exact beat wording is not required.
 - Keep numbering sequential and titles clear.
@@ -277,6 +279,7 @@ Requirements:
 - Keep an existing chapter title when one is provided, unless it is clearly broken.
 - Every repaired chapter must contain at least 3 distinct, specific key events.
 - If chapter details provide multiple beats, convert them into 3-5 concrete key events instead of 1-2 broad summaries.
+- When chapter details include purpose, setting, tone, characters, must-include items, avoid items, or chapter guidance, carry them into the repaired chapter outline instead of dropping them.
 - Faithful paraphrase of beats is acceptable; preserve the narrative intent and progression.
 - Do not repeat already accepted chapters.
 - Do not include commentary, notes, STORY_ARC, or WORLD_ELEMENTS in the response.
@@ -336,6 +339,7 @@ Requirements:
 - Do not skip chapters, combine chapters, or leave placeholders.
 - Every chapter must contain at least 3 distinct, specific key events.
 - If chapter details provide multiple beats, convert them into 3-5 concrete key events instead of 1-2 broad summaries.
+- When chapter details include purpose, setting, tone, characters, must-include items, avoid items, or chapter guidance, reflect them in the regenerated outline instead of flattening them away.
 - Faithful paraphrase of beats is acceptable; preserve the narrative intent and progression.
 - Keep numbering sequential and titles clear.
 - Output outline content only. Do not include STORY_ARC, WORLD_ELEMENTS, commentary, or notes.

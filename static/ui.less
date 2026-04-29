@@ -642,8 +642,16 @@ p {
   align-items: start;
 }
 
+.chapter-detail-group__fields--rich {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .chapter-detail-group__field {
   min-width: 0;
+}
+
+.chapter-detail-group__field--full {
+  grid-column: 1 / -1;
 }
 
 .chapter-detail-group__field--compact {

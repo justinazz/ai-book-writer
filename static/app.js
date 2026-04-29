@@ -11,11 +11,31 @@
   const initialReaderTarget = defaultReaderTargetFor(initialState);
   let selectedReaderView = initialReaderTarget.view;
   let selectedChapterNumber = initialReaderTarget.chapterNumber;
+  let activeChapterToolNumber = Number(initialReaderTarget.chapterNumber || initialState.current_chapter || 1) || 1;
   let activeTab = "";
   let manualTabSelection = false;
   let manualReaderSelection = false;
   let waitingReminderTimer = null;
   const dirtyFields = new Set();
+  const runtimeSettingFieldIds = new Set([
+    "endpoint_url",
+    "outline_model",
+    "writer_model",
+    "token_limit_enabled",
+    "max_tokens",
+    "reduce_thinking",
+    "max_iterations",
+  ]);
+  const runtimeAwareActions = new Set([
+    "/approve-outline",
+    "/regenerate-outline",
+    "/mode",
+    "/continue",
+    "/advice",
+    "/chapter-advice",
+  ]);
+  let runtimeSettingsSyncTimer = null;
+  let lastSyncedRuntimeSettings = "";
 
   function byId(id) {
     return document.getElementById(id);
@@ -63,6 +83,74 @@
     const text = String(message || "Request failed.").trim();
     const latestError = byId("latest-error");
     if (latestError) latestError.textContent = text;
+  }
+
+  function appendSetupFields(formData, predicate) {
+    const setupForm = byId("run-setup-form");
+    if (!setupForm) return;
+    new FormData(setupForm).forEach((value, key) => {
+      if (formData.has(key)) return;
+      if (predicate && !predicate(key)) return;
+      formData.append(key, value);
+    });
+  }
+
+  function buildRuntimeSettingsPayload() {
+    const payload = new URLSearchParams();
+    appendSetupFields(payload, (key) => runtimeSettingFieldIds.has(key));
+    return payload.toString();
+  }
+
+  function shouldSyncRuntimeSettings() {
+    const state = lastKnownState || {};
+    return Boolean(state.run_active || state.awaiting_outline_approval || state.resume_available);
+  }
+
+  function hasDirtyRuntimeSettings() {
+    return Array.from(runtimeSettingFieldIds).some((fieldId) => dirtyFields.has(fieldId));
+  }
+
+  function clearRuntimeSettingDirtyFields() {
+    runtimeSettingFieldIds.forEach((fieldId) => dirtyFields.delete(fieldId));
+  }
+
+  async function syncRuntimeSettingsNow(payload) {
+    try {
+      const response = await fetch("/update-runtime-settings", {
+        method: "POST",
+        body: payload,
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+          "X-Requested-With": "fetch",
+        },
+      });
+      if (!response.ok) {
+        showAsyncError(await responseMessage(response));
+        return;
+      }
+      const latestPayload = buildRuntimeSettingsPayload();
+      if (latestPayload === payload) {
+        lastSyncedRuntimeSettings = payload;
+        clearRuntimeSettingDirtyFields();
+      } else {
+        scheduleRuntimeSettingsSync({ immediate: true });
+      }
+    } catch (_error) {
+      showAsyncError("Runtime settings update failed. Please retry.");
+    }
+  }
+
+  function scheduleRuntimeSettingsSync({ immediate = false } = {}) {
+    if (!shouldSyncRuntimeSettings()) return;
+    const payload = buildRuntimeSettingsPayload();
+    if (!payload || payload === lastSyncedRuntimeSettings) return;
+    if (runtimeSettingsSyncTimer) {
+      window.clearTimeout(runtimeSettingsSyncTimer);
+    }
+    runtimeSettingsSyncTimer = window.setTimeout(() => {
+      runtimeSettingsSyncTimer = null;
+      syncRuntimeSettingsNow(payload);
+    }, immediate ? 0 : 350);
   }
 
   function setBoundText(binding, value) {
@@ -388,59 +476,318 @@
     dirtyFields.delete(fieldId);
   }
 
+  function setFieldValueForce(fieldId, value) {
+    const element = byId(fieldId);
+    if (!element) return;
+    element.value = value ?? "";
+    dirtyFields.delete(fieldId);
+  }
+
   function setSelectValue(fieldId, value) {
     setFieldValue(fieldId, value);
   }
 
-  function collectChapterDetailsFields() {
+  function normalizeLineList(value) {
+    return String(value ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
+      .filter(Boolean);
+  }
+
+  function normalizeMultilineLines(value) {
+    if (Array.isArray(value)) {
+      return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+    }
+    return String(value ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  function setChapterDetailValue(detail, path, value) {
+    const parts = String(path || "").split(".").filter(Boolean);
+    if (!parts.length) return;
+    let current = detail;
+    parts.forEach((part, index) => {
+      if (index === parts.length - 1) {
+        current[part] = value;
+        return;
+      }
+      if (!current[part] || typeof current[part] !== "object" || Array.isArray(current[part])) {
+        current[part] = {};
+      }
+      current = current[part];
+    });
+  }
+
+  function sanitizeChapterDetail(detail) {
+    const source = detail && typeof detail === "object" ? detail : {};
+    const cleaned = {};
+    ["purpose", "beats", "tone", "characters", "setting"].forEach((key) => {
+      const text = String(source[key] ?? "").trim();
+      if (text) cleaned[key] = text;
+    });
+    const targetWordCount = Number(source.target_word_count || 0);
+    if (Number.isFinite(targetWordCount) && targetWordCount > 0) {
+      cleaned.target_word_count = targetWordCount;
+    }
+    const mustInclude = Array.isArray(source.must_include) ? source.must_include : normalizeLineList(source.must_include || "");
+    if (mustInclude.length) cleaned.must_include = mustInclude;
+    const avoid = Array.isArray(source.avoid) ? source.avoid : normalizeLineList(source.avoid || "");
+    if (avoid.length) cleaned.avoid = avoid;
+    const guidanceSource = source.chapter_guidance && typeof source.chapter_guidance === "object" ? source.chapter_guidance : {};
+    const guidance = {};
+    const emphasis = String(guidanceSource.emphasis ?? "").trim();
+    const compression = String(guidanceSource.compression ?? "").trim();
+    if (emphasis) guidance.emphasis = emphasis;
+    if (compression) guidance.compression = compression;
+    const distributionSource = guidanceSource.word_count_distribution && typeof guidanceSource.word_count_distribution === "object"
+      ? guidanceSource.word_count_distribution
+      : {};
+    const distribution = {};
+    ["opening", "middle", "ending"].forEach((key) => {
+      const text = String(distributionSource[key] ?? "").trim();
+      if (text) distribution[key] = text;
+    });
+    if (Object.keys(distribution).length) guidance.word_count_distribution = distribution;
+    if (Object.keys(guidance).length) cleaned.chapter_guidance = guidance;
+    return cleaned;
+  }
+
+  function normalizeChapterDetailForEditor(detail) {
+    const cleaned = sanitizeChapterDetail(detail);
+    const guidance = cleaned.chapter_guidance || {};
+    const distribution = guidance.word_count_distribution || {};
+    return {
+      purpose: cleaned.purpose ?? "",
+      beats: cleaned.beats ?? "",
+      target_word_count: Number(cleaned.target_word_count ?? 0),
+      tone: cleaned.tone ?? "",
+      characters: cleaned.characters ?? "",
+      setting: cleaned.setting ?? "",
+      must_include: Array.isArray(cleaned.must_include) ? cleaned.must_include : [],
+      avoid: Array.isArray(cleaned.avoid) ? cleaned.avoid : [],
+      chapter_guidance: {
+        emphasis: guidance.emphasis ?? "",
+        compression: guidance.compression ?? "",
+        word_count_distribution: {
+          opening: distribution.opening ?? "",
+          middle: distribution.middle ?? "",
+          ending: distribution.ending ?? "",
+        },
+      },
+    };
+  }
+
+  function chapterDetailForState(state, chapterNumber) {
+    const details = state?.chapter_details || {};
+    const detail = details[chapterNumber] ?? details[String(chapterNumber)] ?? {};
+    return normalizeChapterDetailForEditor(detail);
+  }
+
+  function chapterImprovementNotesForState(state, chapterNumber) {
+    const chapter = (state?.chapters || []).find((item) => Number(item.number) === Number(chapterNumber));
+    return chapter?.improvement_notes || "No advice submitted yet for this chapter.";
+  }
+
+  function applyChapterToolDetails(chapterNumber, state, force = false) {
+    const totalChapters = Math.max(1, Number(state?.total_chapters || state?.num_chapters || 1));
+    const targetChapter = Math.max(1, Math.min(totalChapters, Number(chapterNumber || state?.current_chapter || 1)));
+    const detail = chapterDetailForState(state || {}, targetChapter);
+    const guidance = detail.chapter_guidance || {};
+    const distribution = guidance.word_count_distribution || {};
+    const setter = force ? setFieldValueForce : setFieldValue;
+    setter("chapter_tools_number", targetChapter);
+    setter("chapter_tool_purpose", detail.purpose || "");
+    setter("chapter_tool_beats", detail.beats || "");
+    setter("chapter_tool_target_word_count", Number(detail.target_word_count || 0));
+    setter("chapter_tool_tone", detail.tone || "");
+    setter("chapter_tool_characters", detail.characters || "");
+    setter("chapter_tool_setting", detail.setting || "");
+    setter("chapter_tool_guidance_emphasis", guidance.emphasis || "");
+    setter("chapter_tool_guidance_compression", guidance.compression || "");
+    setter("chapter_tool_guidance_opening", distribution.opening || "");
+    setter("chapter_tool_guidance_middle", distribution.middle || "");
+    setter("chapter_tool_guidance_ending", distribution.ending || "");
+    setter("chapter_tool_must_include", (detail.must_include || []).join("\n"));
+    setter("chapter_tool_avoid", (detail.avoid || []).join("\n"));
+    const advicePanel = byId("last-advice");
+    if (advicePanel) {
+      advicePanel.textContent = chapterImprovementNotesForState(state || {}, targetChapter);
+    }
+    activeChapterToolNumber = targetChapter;
+  }
+
+  function collectRawChapterDetailInputs() {
     const details = {};
-    document.querySelectorAll(".chapter-detail-beats-input, .chapter-detail-wordcount-input").forEach((input) => {
+    document.querySelectorAll("[data-chapter][data-detail-path]").forEach((input) => {
       const chapter = Number(input.dataset.chapter || "0");
       if (!chapter) return;
-      details[chapter] = details[chapter] || { beats: "", target_word_count: 0 };
-      if (input.classList.contains("chapter-detail-beats-input")) {
-        details[chapter].beats = input.value;
-      } else {
-        details[chapter].target_word_count = Number(input.value || 0);
+      const path = input.dataset.detailPath || "";
+      const valueType = input.dataset.valueType || (input.type === "number" ? "number" : "text");
+      details[chapter] = details[chapter] || {};
+      if (valueType === "number") {
+        const numericValue = Number(input.value || 0);
+        setChapterDetailValue(details[chapter], path, Number.isFinite(numericValue) ? numericValue : 0);
+        return;
       }
+      if (valueType === "list") {
+        setChapterDetailValue(details[chapter], path, normalizeLineList(input.value));
+        return;
+      }
+      setChapterDetailValue(details[chapter], path, String(input.value ?? ""));
     });
     Object.keys(details).forEach((chapter) => {
-      const item = details[chapter];
-      if (!(item.beats || item.target_word_count > 0)) delete details[chapter];
+      details[chapter] = normalizeChapterDetailForEditor(details[chapter]);
     });
     return details;
+  }
+
+  function collectChapterDetailsFields() {
+    const details = collectRawChapterDetailInputs();
+    Object.keys(details).forEach((chapter) => {
+      const item = sanitizeChapterDetail(details[chapter]);
+      if (!Object.keys(item).length) {
+        delete details[chapter];
+      } else {
+        details[chapter] = item;
+      }
+    });
+    return details;
+  }
+
+  function collectChapterDetailsForConfig(numChapters) {
+    const rawDetails = collectRawChapterDetailInputs();
+    const total = Math.max(1, Number(numChapters || 1));
+    const details = {};
+    for (let chapter = 1; chapter <= total; chapter += 1) {
+      const item = rawDetails[chapter] ?? rawDetails[String(chapter)] ?? {};
+      details[chapter] = normalizeChapterDetailForEditor(item);
+    }
+    return details;
+  }
+
+  function serializeChapterDetailForConfig(detail) {
+    const normalized = normalizeChapterDetailForEditor(detail);
+    const guidance = normalized.chapter_guidance || {};
+    const distribution = guidance.word_count_distribution || {};
+    return {
+      purpose: normalizeMultilineLines(normalized.purpose),
+      beats: normalizeMultilineLines(normalized.beats),
+      target_word_count: Number(normalized.target_word_count || 0),
+      chapter_guidance: {
+        emphasis: String(guidance.emphasis || "").trim(),
+        compression: String(guidance.compression || "").trim(),
+        word_count_distribution: {
+          opening: String(distribution.opening || "").trim(),
+          middle: String(distribution.middle || "").trim(),
+          ending: String(distribution.ending || "").trim(),
+        },
+      },
+      tone: normalizeMultilineLines(normalized.tone),
+      characters: normalizeMultilineLines(normalized.characters),
+      setting: String(normalized.setting || "").trim(),
+      must_include: Array.isArray(normalized.must_include) ? normalized.must_include : [],
+      avoid: Array.isArray(normalized.avoid) ? normalized.avoid : [],
+    };
+  }
+
+  function serializePromptSectionsForConfig(state) {
+    return {
+      premise: normalizeMultilineLines(byId("premise")?.value || ""),
+      storylines: byId("storylines")?.value || "",
+      setting: byId("setting")?.value || "",
+      characters: normalizeMultilineLines(byId("characters")?.value || ""),
+      writing_style: byId("writing_style")?.value || "",
+      tone: normalizeMultilineLines(byId("tone")?.value || ""),
+      plot_beats: normalizeMultilineLines(byId("plot_beats")?.value || ""),
+      constraints: byId("constraints")?.value || "",
+    };
   }
 
   function renderChapterDetailEditors(numChapters, values) {
     const container = byId("chapter-details-editor");
     if (!container) return;
     const details = values || {};
-    const existingDetails = collectChapterDetailsFields();
+    const existingDetails = collectRawChapterDetailInputs();
     const mergedDetails = pendingSync.full ? details : { ...details, ...existingDetails };
     const total = Math.max(1, Number(numChapters || 1));
     const normalizedDetails = {};
     for (let chapter = 1; chapter <= total; chapter += 1) {
       const item = mergedDetails[chapter] ?? mergedDetails[String(chapter)] ?? {};
-      normalizedDetails[chapter] = {
-        beats: item.beats ?? "",
-        target_word_count: Number(item.target_word_count ?? 0),
-      };
+      normalizedDetails[chapter] = normalizeChapterDetailForEditor(item);
     }
     const signature = JSON.stringify({ total, details: normalizedDetails });
     if (!pendingSync.full && signature === lastRenderedChapterDetailSignature) return;
     let html = "";
     for (let chapter = 1; chapter <= total; chapter += 1) {
       const detail = normalizedDetails[chapter];
+      const distribution = detail.chapter_guidance?.word_count_distribution || {};
       html += `<div class="chapter-detail-group" data-chapter-group="${chapter}">`;
       html += `<div class="chapter-detail-group__heading">Chapter ${chapter}</div>`;
-      html += `<div class="chapter-detail-group__fields">`;
-      html += `<div class="chapter-detail-group__field chapter-detail-group__field--text">`;
-      html += `<label class="label" for="chapter_detail_beats_${chapter}">Chapter Details</label>`;
-      html += `<textarea id="chapter_detail_beats_${chapter}" name="chapter_detail_beats_${chapter}" class="chapter-detail-beats-input" data-chapter="${chapter}" placeholder="Required beats for Chapter ${chapter}.">${escapeHtml(detail.beats || "")}</textarea>`;
+      html += `<div class="chapter-detail-group__fields chapter-detail-group__fields--rich">`;
+      html += `<div class="chapter-detail-group__field chapter-detail-group__field--full">`;
+      html += `<label class="label" for="chapter_detail_purpose_${chapter}">Purpose</label>`;
+      html += `<textarea id="chapter_detail_purpose_${chapter}" name="chapter_detail_purpose_${chapter}" data-chapter="${chapter}" data-detail-path="purpose" placeholder="What this chapter needs to accomplish.">${escapeHtml(detail.purpose || "")}</textarea>`;
       html += `</div>`;
-      html += `<div class="chapter-detail-group__field chapter-detail-group__field--compact">`;
+      html += `<div class="chapter-detail-group__field chapter-detail-group__field--full">`;
+      html += `<label class="label" for="chapter_detail_beats_${chapter}">Beats</label>`;
+      html += `<textarea id="chapter_detail_beats_${chapter}" name="chapter_detail_beats_${chapter}" class="chapter-detail-beats-input" data-chapter="${chapter}" data-detail-path="beats" placeholder="Required beats for Chapter ${chapter}.">${escapeHtml(detail.beats || "")}</textarea>`;
+      html += `</div>`;
+      html += `<div class="field-grid-two chapter-detail-group__field chapter-detail-group__field--full">`;
+      html += `<div>`;
       html += `<label class="label" for="chapter_detail_wordcount_${chapter}">Target Word Count</label>`;
-      html += `<input id="chapter_detail_wordcount_${chapter}" name="chapter_detail_wordcount_${chapter}" type="number" min="0" max="50000" class="chapter-detail-wordcount-input" data-chapter="${chapter}" value="${Number(detail.target_word_count || 0)}">`;
+      html += `<input id="chapter_detail_wordcount_${chapter}" name="chapter_detail_wordcount_${chapter}" type="number" min="0" max="50000" class="chapter-detail-wordcount-input" data-chapter="${chapter}" data-detail-path="target_word_count" data-value-type="number" value="${Number(detail.target_word_count || 0)}">`;
+      html += `</div>`;
+      html += `<div>`;
+      html += `<label class="label" for="chapter_detail_tone_${chapter}">Tone</label>`;
+      html += `<textarea id="chapter_detail_tone_${chapter}" name="chapter_detail_tone_${chapter}" data-chapter="${chapter}" data-detail-path="tone" placeholder="Chapter-specific emotional and narrative tone.">${escapeHtml(detail.tone || "")}</textarea>`;
+      html += `</div>`;
+      html += `</div>`;
+      html += `<div class="chapter-detail-group__field chapter-detail-group__field--full">`;
+      html += `<label class="label" for="chapter_detail_characters_${chapter}">Characters</label>`;
+      html += `<textarea id="chapter_detail_characters_${chapter}" name="chapter_detail_characters_${chapter}" data-chapter="${chapter}" data-detail-path="characters" placeholder="Who this chapter should foreground.">${escapeHtml(detail.characters || "")}</textarea>`;
+      html += `</div>`;
+      html += `<div class="chapter-detail-group__field chapter-detail-group__field--full">`;
+      html += `<label class="label" for="chapter_detail_setting_${chapter}">Setting</label>`;
+      html += `<textarea id="chapter_detail_setting_${chapter}" name="chapter_detail_setting_${chapter}" data-chapter="${chapter}" data-detail-path="setting" placeholder="Specific location, atmosphere, and physical context.">${escapeHtml(detail.setting || "")}</textarea>`;
+      html += `</div>`;
+      html += `<div class="field-grid-two chapter-detail-group__field chapter-detail-group__field--full">`;
+      html += `<div>`;
+      html += `<label class="label" for="chapter_detail_guidance_emphasis_${chapter}">Guidance: Emphasis</label>`;
+      html += `<textarea id="chapter_detail_guidance_emphasis_${chapter}" name="chapter_detail_guidance_emphasis_${chapter}" data-chapter="${chapter}" data-detail-path="chapter_guidance.emphasis" placeholder="Where the chapter should spend its weight.">${escapeHtml(detail.chapter_guidance?.emphasis || "")}</textarea>`;
+      html += `</div>`;
+      html += `<div>`;
+      html += `<label class="label" for="chapter_detail_guidance_compression_${chapter}">Guidance: Compression</label>`;
+      html += `<textarea id="chapter_detail_guidance_compression_${chapter}" name="chapter_detail_guidance_compression_${chapter}" data-chapter="${chapter}" data-detail-path="chapter_guidance.compression" placeholder="What should stay brief or tight.">${escapeHtml(detail.chapter_guidance?.compression || "")}</textarea>`;
+      html += `</div>`;
+      html += `</div>`;
+      html += `<div class="field-grid-three chapter-detail-group__field chapter-detail-group__field--full">`;
+      html += `<div>`;
+      html += `<label class="label" for="chapter_detail_guidance_opening_${chapter}">Opening Share</label>`;
+      html += `<input id="chapter_detail_guidance_opening_${chapter}" name="chapter_detail_guidance_opening_${chapter}" type="text" data-chapter="${chapter}" data-detail-path="chapter_guidance.word_count_distribution.opening" placeholder="15%" value="${escapeHtml(distribution.opening || "")}">`;
+      html += `</div>`;
+      html += `<div>`;
+      html += `<label class="label" for="chapter_detail_guidance_middle_${chapter}">Middle Share</label>`;
+      html += `<input id="chapter_detail_guidance_middle_${chapter}" name="chapter_detail_guidance_middle_${chapter}" type="text" data-chapter="${chapter}" data-detail-path="chapter_guidance.word_count_distribution.middle" placeholder="55%" value="${escapeHtml(distribution.middle || "")}">`;
+      html += `</div>`;
+      html += `<div>`;
+      html += `<label class="label" for="chapter_detail_guidance_ending_${chapter}">Ending Share</label>`;
+      html += `<input id="chapter_detail_guidance_ending_${chapter}" name="chapter_detail_guidance_ending_${chapter}" type="text" data-chapter="${chapter}" data-detail-path="chapter_guidance.word_count_distribution.ending" placeholder="30%" value="${escapeHtml(distribution.ending || "")}">`;
+      html += `</div>`;
+      html += `</div>`;
+      html += `<div class="field-grid-two chapter-detail-group__field chapter-detail-group__field--full">`;
+      html += `<div>`;
+      html += `<label class="label" for="chapter_detail_must_include_${chapter}">Must Include</label>`;
+      html += `<textarea id="chapter_detail_must_include_${chapter}" name="chapter_detail_must_include_${chapter}" data-chapter="${chapter}" data-detail-path="must_include" data-value-type="list" placeholder="One item per line.">${escapeHtml((detail.must_include || []).join("\n"))}</textarea>`;
+      html += `</div>`;
+      html += `<div>`;
+      html += `<label class="label" for="chapter_detail_avoid_${chapter}">Avoid</label>`;
+      html += `<textarea id="chapter_detail_avoid_${chapter}" name="chapter_detail_avoid_${chapter}" data-chapter="${chapter}" data-detail-path="avoid" data-value-type="list" placeholder="One item per line.">${escapeHtml((detail.avoid || []).join("\n"))}</textarea>`;
+      html += `</div>`;
+      html += `</div>`;
+      html += `<div class="chapter-detail-group__field chapter-detail-group__field--full">`;
+      html += `<div class="support-copy">All fields are optional. Old configs with only beats and target word count will continue to load correctly.</div>`;
       html += `</div>`;
       html += `</div>`;
       html += `</div>`;
@@ -452,31 +799,29 @@
   }
 
   function buildExternalConfigFromState(state) {
-    const liveChapterDetails = collectChapterDetailsFields();
+    const totalChapters = Number(byId("num_chapters")?.value ?? state.num_chapters ?? 10);
+    const liveChapterDetails = collectChapterDetailsForConfig(totalChapters);
+    const serializedChapterDetails = {};
+    Object.keys(liveChapterDetails).forEach((chapter) => {
+      serializedChapterDetails[chapter] = serializeChapterDetailForConfig(liveChapterDetails[chapter]);
+    });
+    const overallWordCountAdviceField = byId("overall_word_count_advice");
     return {
       name: byId("config_name")?.value.trim() || "external-config",
       created_at: new Date().toISOString(),
       endpoint_url: byId("endpoint_url")?.value || state.endpoint_url || "",
       outline_model: byId("outline_model")?.value || state.outline_model || "",
       writer_model: byId("writer_model")?.value || state.writer_model || "",
-      num_chapters: Number(byId("num_chapters")?.value ?? state.num_chapters ?? 10),
+      num_chapters: totalChapters,
       token_limit_enabled: byId("token_limit_enabled")?.value === "on",
       max_tokens: Number(byId("max_tokens")?.value ?? state.max_tokens ?? 4096),
       reduce_thinking: byId("reduce_thinking")?.value === "on",
       max_iterations: Number(byId("max_iterations")?.value ?? state.max_iterations ?? 5),
       chapter_target_word_count: Number(byId("chapter_target_word_count")?.value ?? state.chapter_target_word_count ?? 0),
+      overall_word_count_advice: overallWordCountAdviceField ? overallWordCountAdviceField.value : (state.overall_word_count_advice || ""),
       output_folder: state.output_folder || "",
-      chapter_details: Object.keys(liveChapterDetails).length ? liveChapterDetails : (state.chapter_details || {}),
-      prompt_sections: {
-        premise: byId("premise")?.value || "",
-        storylines: byId("storylines")?.value || "",
-        setting: byId("setting")?.value || "",
-        characters: byId("characters")?.value || "",
-        writing_style: byId("writing_style")?.value || "",
-        tone: byId("tone")?.value || "",
-        plot_beats: byId("plot_beats")?.value || "",
-        constraints: byId("constraints")?.value || "",
-      },
+      chapter_details: serializedChapterDetails,
+      prompt_sections: serializePromptSectionsForConfig(state),
     };
   }
 
@@ -533,14 +878,9 @@
   }
 
   function syncSelectedChapterInputs(chapterNumber, state) {
-    const adviceField = byId("chapter_advice_number");
-    const regenField = byId("regen_chapter_number");
-    if (adviceField && document.activeElement !== adviceField && !dirtyFields.has("chapter_advice_number")) {
-      adviceField.value = chapterNumber || state.current_chapter || 1;
-    }
-    if (regenField && document.activeElement !== regenField && !dirtyFields.has("regen_chapter_number")) {
-      regenField.value = chapterNumber || state.current_chapter || 1;
-    }
+    const targetChapter = Number(chapterNumber || state.current_chapter || activeChapterToolNumber || 1);
+    const shouldForce = pendingSync.full || targetChapter !== activeChapterToolNumber;
+    applyChapterToolDetails(targetChapter, state, shouldForce);
   }
 
   function renderSelectedChapter(state) {
@@ -645,6 +985,7 @@
     setFieldValue("plot_beats", state.prompt_sections?.plot_beats || "");
     setFieldValue("constraints", state.prompt_sections?.constraints || "");
     setFieldValue("chapter_target_word_count", state.chapter_target_word_count ?? 0);
+    setFieldValue("overall_word_count_advice", state.overall_word_count_advice || "");
     setFieldValue("num_chapters", state.num_chapters ?? 10);
     renderChapterDetailEditors(state.num_chapters ?? 10, state.chapter_details || {});
     setSelectValue("token_limit_enabled", state.token_limit_enabled ? "on" : "off");
@@ -657,7 +998,6 @@
     byId("checkpoint-body").textContent = state.current_checkpoint_body || "Nothing to review yet.";
     byId("outline-text").textContent = state.outline_text || "Outline not generated yet.";
     byId("outline-reference").textContent = state.outline_text || "Outline not generated yet.";
-    byId("last-advice").textContent = state.latest_advice || "No advice submitted yet.";
     byId("model-error").textContent = state.model_fetch_error || "No model errors.";
     byId("latest-error").textContent = state.latest_error || "No errors recorded.";
     byId("recent-events").textContent = state.recent_events || "No events yet.";
@@ -712,6 +1052,9 @@
         lastCompletionSignal = completionSignal;
       }
     }
+    if (!hasDirtyRuntimeSettings()) {
+      lastSyncedRuntimeSettings = buildRuntimeSettingsPayload();
+    }
     resetQueuedSync();
   }
 
@@ -719,8 +1062,20 @@
     root.querySelectorAll("input, textarea, select").forEach((field) => {
       if (field.dataset.dirtyBound === "true" || field.id === "textarea-modal-input") return;
       field.dataset.dirtyBound = "true";
-      field.addEventListener("input", () => field.id && dirtyFields.add(field.id));
-      field.addEventListener("change", () => field.id && dirtyFields.add(field.id));
+      field.addEventListener("input", () => {
+        if (!field.id) return;
+        dirtyFields.add(field.id);
+        if (runtimeSettingFieldIds.has(field.id)) {
+          scheduleRuntimeSettingsSync();
+        }
+      });
+      field.addEventListener("change", () => {
+        if (!field.id) return;
+        dirtyFields.add(field.id);
+        if (runtimeSettingFieldIds.has(field.id)) {
+          scheduleRuntimeSettingsSync({ immediate: true });
+        }
+      });
     });
   }
 
@@ -735,13 +1090,10 @@
         event.preventDefault();
         const action = form.dataset.submitAction || form.getAttribute("action") || window.location.pathname;
         const formData = new FormData(form);
-        if (action === "/save-config") {
-          const setupForm = byId("run-setup-form");
-          if (setupForm) {
-            new FormData(setupForm).forEach((value, key) => {
-              if (!formData.has(key)) formData.append(key, value);
-            });
-          }
+        if (action === "/save-config" || action === "/regenerate-chapter") {
+          appendSetupFields(formData);
+        } else if (runtimeAwareActions.has(action)) {
+          appendSetupFields(formData, (key) => runtimeSettingFieldIds.has(key));
         }
         try {
           const response = await fetch(action, {
@@ -764,10 +1116,8 @@
           }
           if (action === "/chapter-advice" || action === "/advice") {
             const targetChapter = Number(formData.get("chapter_number") || "0");
-            const regenField = byId("regen_chapter_number");
-            if (regenField && targetChapter > 0) {
-              regenField.value = targetChapter;
-              dirtyFields.add("regen_chapter_number");
+            if (targetChapter > 0) {
+              activeChapterToolNumber = targetChapter;
             }
           }
         } catch (_error) {
@@ -790,6 +1140,17 @@
   });
   byId("num_chapters")?.addEventListener("input", (event) => {
     renderChapterDetailEditors(event.target.value, collectChapterDetailsFields());
+  });
+  byId("chapter_tools_number")?.addEventListener("change", (event) => {
+    const totalChapters = Math.max(1, Number(lastKnownState?.total_chapters || lastKnownState?.num_chapters || 1));
+    const targetChapter = Math.max(1, Math.min(totalChapters, Number(event.target.value || 1)));
+    manualReaderSelection = true;
+    selectedReaderView = "chapter";
+    selectedChapterNumber = targetChapter;
+    activeChapterToolNumber = targetChapter;
+    renderChapterList(lastKnownState);
+    renderSelectedChapter(lastKnownState);
+    applyChapterToolDetails(targetChapter, lastKnownState, true);
   });
   byId("external-config-button")?.addEventListener("click", () => byId("external-config-input").click());
   byId("external-config-input")?.addEventListener("change", async (event) => {
@@ -840,6 +1201,7 @@
   });
 
   applyState(initialState);
+  lastSyncedRuntimeSettings = buildRuntimeSettingsPayload();
 
   const source = new EventSource("/events");
   source.onmessage = (event) => applyState(JSON.parse(event.data));

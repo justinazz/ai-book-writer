@@ -117,6 +117,7 @@ class BookAgents:
             4. Format must match EXACTLY - including all headings and bullet points
             5. When chapter beats are provided, summarize them into 3-5 distinct Key Events instead of collapsing them into 1-2 vague bullets
             6. Preserve the narrative intent of the chapter beats, but natural paraphrase is allowed
+            7. When chapter details include purpose, setting, tone, characters, must-include items, avoid items, or chapter guidance, reflect them in the outline instead of dropping them
 
             Initial Premise:
             {initial_prompt}
@@ -189,6 +190,13 @@ class BookAgents:
             15. Do not import explicit beats from other chapters into the current chapter
             16. When prior feedback identifies failed checklist items, repair those failed items before adding extra flourish
             17. Never copy prompt scaffolding such as Retry Context, Recovery Context, beat-check labels, checklist headings, or compliance summaries into the prose
+            18. If the chapter prompt includes Additional Chapter Guidance, use it to shape emphasis, pacing, tone, setting, and character focus after the required beats are satisfied
+            19. If the chapter needs more length, deepen the existing beats before inventing any new event, coda, or aftermath
+            20. Preferred expansion order: sharper sensory detail, clearer physical action, richer dialogue subtext, deeper interiority, and more immediate consequences inside the active beat
+            21. Do not tack on a low-stakes postscript, recap, travel beat, or generic reflection after the intended ending just to reach the word count
+            22. Every added paragraph should either advance a required beat, intensify it, reveal character, or sharpen the atmosphere
+            23. When an important beat arrives, slow down and dramatize it on page instead of summarizing past it
+            24. If the natural scene ending has landed cleanly, stop rather than padding beyond it
             
             Use the outline and previous content for continuity, but never let them override the current chapter beat anchors in the active prompt.
             Mark drafts with 'SCENE:' and final versions with 'SCENE FINAL:'""",
@@ -217,6 +225,9 @@ class BookAgents:
             14. Faithful paraphrase of a beat should pass when the same action, reveal, or interaction clearly occurs in the right order
             15. Result lines must be exact standalone lines ending in only PASS or FAIL with no extra explanation on that line
             16. Do not fail sentence length based on a fragment below the allowed limit or on vague style concerns; only fail it when an actual sentence exceeds the limit
+            17. Reject chapters that appear to hit length by stapling on low-value filler, recap, or a fresh aftermath beat after the intended ending
+            18. When a chapter is short, direct expansion toward underdeveloped existing beats through dialogue subtext, sensory detail, interiority, physical business, or immediate consequences
+            19. Do not suggest adding a brand-new coda, epilogue, travel beat, or generic reflection solely to raise the word count
             
             Format your responses:
             1. If the prompt asks for structured JSON feedback, return only valid JSON with the exact keys requested
@@ -230,6 +241,7 @@ class BookAgents:
             9. Include dedicated word-count guidance whenever a target word count is provided
             10. If the draft is already inside the allowed word-count range, state that no word-count changes are required and do not suggest trimming or padding merely to hit the exact target
             11. Keep sentence-fragment word counts inside the sentence-length section only; do not present a fragment count as the draft or chapter word count
+            12. If the draft is short, point the writer toward earlier or existing beats that need more depth instead of recommending a new late scene solely for length
 
             Base your review on the current chapter requirements and continuity notes provided in the active prompt.
             Do not rely on hidden assumptions about later chapters or missing full-book context.
